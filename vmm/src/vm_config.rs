@@ -687,11 +687,64 @@ impl ApplyLandlock for VsockConfig {
 #[cfg(feature = "ivshmem")]
 pub const DEFAULT_IVSHMEM_SIZE: usize = 128;
 
+/// Frame buffer configuration for IVSHMEM device
+#[cfg(feature = "ivshmem")]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct FrameBufferConfig {
+    /// Frame width in pixels
+    #[serde(default = "default_frame_width")]
+    pub width: u32,
+    /// Frame height in pixels
+    #[serde(default = "default_frame_height")]
+    pub height: u32,
+    /// Pixel format: "BGRA32", "RGBA32", "NV12"
+    #[serde(default = "default_frame_format")]
+    pub format: String,
+    /// Number of buffers (default: 3 for triple buffering)
+    #[serde(default = "default_buffer_count")]
+    pub buffer_count: u32,
+}
+
+#[cfg(feature = "ivshmem")]
+fn default_frame_width() -> u32 {
+    1920
+}
+
+#[cfg(feature = "ivshmem")]
+fn default_frame_height() -> u32 {
+    1080
+}
+
+#[cfg(feature = "ivshmem")]
+fn default_frame_format() -> String {
+    "BGRA32".to_string()
+}
+
+#[cfg(feature = "ivshmem")]
+fn default_buffer_count() -> u32 {
+    3
+}
+
+#[cfg(feature = "ivshmem")]
+impl Default for FrameBufferConfig {
+    fn default() -> Self {
+        Self {
+            width: default_frame_width(),
+            height: default_frame_height(),
+            format: default_frame_format(),
+            buffer_count: default_buffer_count(),
+        }
+    }
+}
+
 #[cfg(feature = "ivshmem")]
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct IvshmemConfig {
     pub path: PathBuf,
     pub size: usize,
+    /// Optional frame buffer configuration for lg-capture support
+    #[serde(default)]
+    pub frame_buffer: Option<FrameBufferConfig>,
 }
 
 #[cfg(feature = "ivshmem")]
@@ -700,6 +753,7 @@ impl Default for IvshmemConfig {
         Self {
             path: PathBuf::new(),
             size: DEFAULT_IVSHMEM_SIZE << 20,
+            frame_buffer: None,
         }
     }
 }

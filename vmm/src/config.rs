@@ -2740,6 +2740,7 @@ impl IvshmemConfig {
         Ok(IvshmemConfig {
             path,
             size: size as usize,
+            frame_buffer: None,
         })
     }
 

@@ -24,14 +24,15 @@ use serde_json::Error as SerdeError;
 use thiserror::Error;
 use vmm_sys_util::eventfd::EventFd;
 
-use self::http_endpoint::{VmActionHandler, VmCreate, VmInfo, VmmPing, VmmShutdown};
+use self::http_endpoint::{VmActionHandler, VmCreate, VmCursorInfo, VmFrameCaptureSetFormat, VmFrameCaptureStart, VmFrameCaptureStatus, VmFrameCaptureStop, VmFrameInfo, VmInfo, VmmPing, VmmShutdown};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::api::VmCoredump;
 use crate::api::{
     AddDisk, ApiError, ApiRequest, VmAddDevice, VmAddFs, VmAddGenericVhostUser, VmAddNet,
-    VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCounters, VmDelete, VmNmi,
-    VmPause, VmPowerButton, VmReboot, VmReceiveMigration, VmRemoveDevice, VmResize, VmResizeDisk,
-    VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown, VmSnapshot,
+    VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot, VmCounters, VmDelete,
+    VmInjectInput, VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration, VmRemoveDevice,
+    VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration, VmShutdown,
+    VmSnapshot,
 };
 use crate::landlock::Landlock;
 use crate::seccomp_filters::{Thread, get_seccomp_filter};
@@ -294,6 +295,30 @@ pub static HTTP_ROUTES: LazyLock<HttpRoutes> = LazyLock::new(|| {
         .insert(endpoint!("/vmm.shutdown"), Box::new(VmmShutdown {}));
     r.routes
         .insert(endpoint!("/vm.nmi"), Box::new(VmActionHandler::new(&VmNmi)));
+    r.routes.insert(
+        endpoint!("/vm.inject-input"),
+        Box::new(VmActionHandler::new(&VmInjectInput)),
+    );
+    r.routes
+        .insert(endpoint!("/vm.frame-info"), Box::new(VmFrameInfo {}));
+    r.routes.insert(
+        endpoint!("/vm.frame-capture.start"),
+        Box::new(VmFrameCaptureStart {}),
+    );
+    r.routes.insert(
+        endpoint!("/vm.frame-capture.stop"),
+        Box::new(VmFrameCaptureStop {}),
+    );
+    r.routes.insert(
+        endpoint!("/vm.frame-capture.status"),
+        Box::new(VmFrameCaptureStatus {}),
+    );
+    r.routes.insert(
+        endpoint!("/vm.frame-capture.set-format"),
+        Box::new(VmFrameCaptureSetFormat {}),
+    );
+    r.routes
+        .insert(endpoint!("/vm.cursor-info"), Box::new(VmCursorInfo {}));
 
     r
 });

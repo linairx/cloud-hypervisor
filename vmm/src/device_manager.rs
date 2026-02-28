@@ -57,6 +57,10 @@ use devices::interrupt_controller::InterruptController;
 use devices::ioapic;
 #[cfg(feature = "ivshmem")]
 use devices::ivshmem::{IvshmemError, IvshmemOps};
+#[cfg(feature = "ivshmem")]
+use devices::{
+    FrameBufferHeader, FrameBufferLayout, FrameFormat,
+};
 #[cfg(target_arch = "aarch64")]
 use devices::legacy::Pl011;
 #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
@@ -1128,7 +1132,31 @@ pub struct DeviceManager {
     #[cfg(feature = "ivshmem")]
     // ivshmem device
     ivshmem_device: Option<Arc<Mutex<devices::IvshmemDevice>>>,
+
+    #[cfg(feature = "ivshmem")]
+    // Frame buffer config and layout for vm_frame_info API
+    frame_buffer_config: Option<crate::vm_config::FrameBufferConfig>,
+
+    #[cfg(feature = "ivshmem")]
+    // Frame buffer layout info for calculating offsets
+    frame_buffer_layout: Option<FrameBufferLayout>,
+
+    #[cfg(feature = "ivshmem")]
+    // Pointer to the frame buffer header in shared memory (for reading frame count/active index)
+    // We wrap the raw pointer to implement Send
+    frame_buffer_header_ptr: Option<FrameBufferHeaderPtr>,
+
+    #[cfg(target_arch = "x86_64")]
+    // i8042 device for PS/2 keyboard and mouse input injection
+    i8042: Option<Arc<Mutex<devices::legacy::I8042Device>>>,
 }
+
+/// Wrapper for frame buffer header pointer to implement Send
+#[cfg(feature = "ivshmem")]
+struct FrameBufferHeaderPtr(*mut devices::FrameBufferHeader);
+
+#[cfg(feature = "ivshmem")]
+unsafe impl Send for FrameBufferHeaderPtr {}
 
 fn create_mmio_allocators(
     start: u64,
@@ -1395,6 +1423,14 @@ impl DeviceManager {
             fw_cfg: None,
             #[cfg(feature = "ivshmem")]
             ivshmem_device: None,
+            #[cfg(feature = "ivshmem")]
+            frame_buffer_config: None,
+            #[cfg(feature = "ivshmem")]
+            frame_buffer_layout: None,
+            #[cfg(feature = "ivshmem")]
+            frame_buffer_header_ptr: None,
+            #[cfg(target_arch = "x86_64")]
+            i8042: None,
         };
 
         let device_manager = Arc::new(Mutex::new(device_manager));
@@ -1413,6 +1449,201 @@ impl DeviceManager {
 
     pub fn console_resize_pipe(&self) -> Option<Arc<File>> {
         self.console_resize_pipe.clone()
+    }
+
+    /// Inject keyboard event into the i8042 device (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
+    pub fn inject_keyboard(&mut self, event: &devices::legacy::KeyboardEvent) -> bool {
+        if let Some(ref i8042) = self.i8042 {
+            i8042.lock().unwrap().inject_keyboard(event.clone());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Inject mouse event into the i8042 device (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
+    pub fn inject_mouse(&mut self, event: &devices::legacy::MouseEvent) -> bool {
+        if let Some(ref i8042) = self.i8042 {
+            i8042.lock().unwrap().inject_mouse(event.clone());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get frame buffer information for vm_frame_info API
+    /// Returns: (width, height, format, buffer_count, frame_number, active_index)
+    #[cfg(feature = "ivshmem")]
+    pub fn frame_buffer_info(&self) -> Option<(u32, u32, String, u32, u64, u32)> {
+        let fb_cfg = self.frame_buffer_config.as_ref()?;
+        let layout = self.frame_buffer_layout.as_ref()?;
+        let header_wrapper = self.frame_buffer_header_ptr.as_ref()?;
+        let header_ptr = header_wrapper.0;
+
+        // SAFETY: The pointer is valid as long as the ivshmem device exists
+        // and was initialized with frame buffer config
+        let (frame_number, active_index) = unsafe {
+            let header = &*header_ptr;
+            (header.frame_count(), header.active_index())
+        };
+
+        Some((
+            fb_cfg.width,
+            fb_cfg.height,
+            fb_cfg.format.clone(),
+            layout.buffer_count,
+            frame_number,
+            active_index,
+        ))
+    }
+
+    /// Start frame capture by sending StartCapture command to Guest Agent
+    #[cfg(feature = "ivshmem")]
+    pub fn frame_capture_start(&self) -> Option<crate::api::VmFrameCaptureStatusResponse> {
+        use devices::frame_buffer::GuestCommand;
+
+        let header_wrapper = self.frame_buffer_header_ptr.as_ref()?;
+        let header_ptr = header_wrapper.0;
+
+        // SAFETY: The pointer is valid as long as the ivshmem device exists
+        unsafe {
+            let header = &*header_ptr;
+            header.set_command(GuestCommand::StartCapture);
+        }
+
+        // Return current status
+        self.frame_capture_status()
+    }
+
+    /// Stop frame capture by sending StopCapture command to Guest Agent
+    #[cfg(feature = "ivshmem")]
+    pub fn frame_capture_stop(&self) -> Option<crate::api::VmFrameCaptureStatusResponse> {
+        use devices::frame_buffer::GuestCommand;
+
+        let header_wrapper = self.frame_buffer_header_ptr.as_ref()?;
+        let header_ptr = header_wrapper.0;
+
+        // SAFETY: The pointer is valid as long as the ivshmem device exists
+        unsafe {
+            let header = &*header_ptr;
+            header.set_command(GuestCommand::StopCapture);
+        }
+
+        // Return current status
+        self.frame_capture_status()
+    }
+
+    /// Get current frame capture status
+    #[cfg(feature = "ivshmem")]
+    pub fn frame_capture_status(&self) -> Option<crate::api::VmFrameCaptureStatusResponse> {
+        use devices::frame_buffer::{GuestCommand, GuestState};
+
+        let fb_cfg = self.frame_buffer_config.as_ref()?;
+        let header_wrapper = self.frame_buffer_header_ptr.as_ref()?;
+        let header_ptr = header_wrapper.0;
+
+        // SAFETY: The pointer is valid as long as the ivshmem device exists
+        let (command, guest_state, guest_pid, frame_count) = unsafe {
+            let header = &*header_ptr;
+            (
+                header.get_command(),
+                header.get_guest_state(),
+                header.get_guest_pid(),
+                header.frame_count(),
+            )
+        };
+
+        let capturing = guest_state == GuestState::Capturing;
+
+        Some(crate::api::VmFrameCaptureStatusResponse {
+            capturing,
+            guest_state: format!("{:?}", guest_state),
+            command: format!("{:?}", command),
+            guest_pid,
+            frame_count,
+            width: fb_cfg.width,
+            height: fb_cfg.height,
+            format: fb_cfg.format.clone(),
+        })
+    }
+
+    /// Set frame capture format
+    #[cfg(feature = "ivshmem")]
+    pub fn frame_capture_set_format(&self, format: &crate::api::VmFrameCaptureFormat) -> bool {
+        // Check if frame buffer is configured
+        if self.frame_buffer_header_ptr.is_none() {
+            return false;
+        }
+
+        // Note: Format changes typically require reinitialization
+        // For now, we just validate and return true
+        // The actual format change would be handled by the Guest Agent
+        // when it receives the SetFormat command
+
+        // Validate format string
+        let valid_formats = ["BGRA32", "RGBA32", "NV12"];
+        if !valid_formats.contains(&format.format.as_str()) {
+            return false;
+        }
+
+        // Validate dimensions
+        if format.width == 0 || format.height == 0 {
+            return false;
+        }
+
+        true
+    }
+
+    #[cfg(not(feature = "ivshmem"))]
+    pub fn frame_capture_start(&self) -> Option<crate::api::VmFrameCaptureStatusResponse> {
+        None
+    }
+
+    #[cfg(not(feature = "ivshmem"))]
+    pub fn frame_capture_stop(&self) -> Option<crate::api::VmFrameCaptureStatusResponse> {
+        None
+    }
+
+    #[cfg(not(feature = "ivshmem"))]
+    pub fn frame_capture_status(&self) -> Option<crate::api::VmFrameCaptureStatusResponse> {
+        None
+    }
+
+    #[cfg(not(feature = "ivshmem"))]
+    pub fn frame_capture_set_format(&self, _format: &crate::api::VmFrameCaptureFormat) -> bool {
+        false
+    }
+
+    /// Get cursor information from frame buffer
+    #[cfg(feature = "ivshmem")]
+    pub fn cursor_info(&self) -> Option<crate::api::VmCursorInfoResponse> {
+        let header_wrapper = self.frame_buffer_header_ptr.as_ref()?;
+        let header_ptr = header_wrapper.0;
+
+        // SAFETY: The pointer is valid as long as the ivshmem device exists
+        unsafe {
+            let header = &*header_ptr;
+            let shape = header.get_cursor_shape();
+
+            Some(crate::api::VmCursorInfoResponse {
+                x: 0,  // Position is stored in CursorMetadata, not header
+                y: 0,
+                visible: header.has_cursor_data(),
+                width: shape.width,
+                height: shape.height,
+                hot_x: shape.hot_x,
+                hot_y: shape.hot_y,
+                has_shape: header.has_cursor_data(),
+                update_count: header.cursor_update_count(),
+            })
+        }
+    }
+
+    #[cfg(not(feature = "ivshmem"))]
+    pub fn cursor_info(&self) -> Option<crate::api::VmCursorInfoResponse> {
+        None
     }
 
     pub fn create_interrupt_controller(
@@ -1965,6 +2196,9 @@ impl DeviceManager {
             reset_evt.try_clone().unwrap(),
             vcpus_kill_signalled.clone(),
         )));
+
+        // Store reference for input injection
+        self.i8042 = Some(Arc::clone(&i8042));
 
         self.bus_devices
             .push(Arc::clone(&i8042) as Arc<dyn BusDeviceSync>);
@@ -4400,7 +4634,76 @@ impl DeviceManager {
             .unwrap()
             .map_ram_region(start_addr, ivshmem_cfg.size, Some(ivshmem_cfg.path.clone()))
             .map_err(DeviceManagerError::IvshmemCreate)?;
-        ivshmem_device.lock().unwrap().set_region(region, mapping);
+        ivshmem_device.lock().unwrap().set_region(region.clone(), mapping);
+
+        // Initialize frame buffer header if frame buffer config is provided
+        if let Some(ref fb_cfg) = ivshmem_cfg.frame_buffer {
+            info!(
+                "Initializing frame buffer: {}x{} {}, {} buffers",
+                fb_cfg.width, fb_cfg.height, fb_cfg.format, fb_cfg.buffer_count
+            );
+
+            let format = match fb_cfg.format.as_str() {
+                "BGRA32" => FrameFormat::Bgra32,
+                "RGBA32" => FrameFormat::Rgba32,
+                "NV12" => FrameFormat::Nv12,
+                _ => {
+                    warn!("Unknown frame format '{}', defaulting to BGRA32", fb_cfg.format);
+                    FrameFormat::Bgra32
+                }
+            };
+
+            // Calculate buffer size based on format
+            let buffer_size = match format {
+                FrameFormat::Bgra32 | FrameFormat::Rgba32 => {
+                    fb_cfg.width as u64 * fb_cfg.height as u64 * 4
+                }
+                FrameFormat::Nv12 => {
+                    let y_size = fb_cfg.width as u64 * fb_cfg.height as u64;
+                    let uv_size = (fb_cfg.width as u64 / 2) * (fb_cfg.height as u64 / 2) * 2;
+                    y_size + uv_size
+                }
+            };
+
+            let layout = FrameBufferLayout::new(fb_cfg.buffer_count, buffer_size);
+
+            // Verify the region is large enough
+            if !layout.validate_region_size(ivshmem_cfg.size) {
+                error!(
+                    "IVSHMEM region too small for frame buffer. Required: {} bytes, available: {} bytes",
+                    layout.total_size, ivshmem_cfg.size
+                );
+                return Err(DeviceManagerError::IvshmemCreate(IvshmemError::CreateUserMemoryRegion));
+            }
+
+            // Initialize the frame buffer header in shared memory
+            let header = FrameBufferHeader::new(
+                fb_cfg.buffer_count,
+                buffer_size,
+                fb_cfg.width,
+                fb_cfg.height,
+                format,
+            );
+
+            // Write header to shared memory and store pointer for later reads
+            // SAFETY: We just created the region and verified its size
+            let header_ptr = unsafe {
+                let region_ptr = region.as_ptr();
+                std::ptr::write_unaligned(region_ptr as *mut FrameBufferHeader, header);
+                region_ptr as *mut FrameBufferHeader
+            };
+
+            // Store config, layout, and header pointer for vm_frame_info API
+            self.frame_buffer_config = Some(fb_cfg.clone());
+            self.frame_buffer_layout = Some(layout);
+            self.frame_buffer_header_ptr = Some(FrameBufferHeaderPtr(header_ptr));
+
+            info!(
+                "Frame buffer initialized: header at offset 0, data at offset {}, total size {} bytes",
+                self.frame_buffer_layout.as_ref().unwrap().data_offset,
+                self.frame_buffer_layout.as_ref().unwrap().total_size
+            );
+        }
 
         let mut node = device_node!(id, ivshmem_device);
         node.resources = new_resources;

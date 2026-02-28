@@ -18,6 +18,8 @@ pub mod interrupt_controller;
 #[cfg(target_arch = "x86_64")]
 pub mod ioapic;
 #[cfg(feature = "ivshmem")]
+pub mod frame_buffer;
+#[cfg(feature = "ivshmem")]
 pub mod ivshmem;
 pub mod legacy;
 #[cfg(feature = "pvmemcontrol")]
@@ -30,6 +32,11 @@ pub mod tpm;
 use bitflags::bitflags;
 
 pub use self::acpi::{AcpiGedDevice, AcpiPmTimerDevice, AcpiShutdownDevice};
+#[cfg(feature = "ivshmem")]
+pub use self::frame_buffer::{
+    FrameBufferHeader, FrameBufferLayout, FrameFlags, FrameFormat, FrameMetadata,
+    DEFAULT_BUFFER_COUNT, FRAME_BUFFER_MAGIC, FRAME_BUFFER_VERSION,
+};
 #[cfg(feature = "ivshmem")]
 pub use self::ivshmem::IvshmemDevice;
 pub use self::pvpanic::{PVPANIC_DEVICE_MMIO_SIZE, PvPanicDevice};

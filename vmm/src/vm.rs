@@ -376,6 +376,9 @@ pub enum Error {
     #[cfg(feature = "fw_cfg")]
     #[error("Error using fw_cfg while disabled")]
     FwCfgDisabled,
+
+    #[error("Frame buffer not configured")]
+    FrameBufferNotConfigured,
 }
 pub type Result<T> = result::Result<T, Error>;
 
@@ -2947,6 +2950,23 @@ impl Vm {
     #[cfg(target_arch = "riscv64")]
     pub fn power_button(&self) -> Result<()> {
         unimplemented!()
+    }
+
+    /// Inject keyboard event into the VM's i8042 device (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
+    pub fn inject_keyboard(&self, event: &devices::legacy::KeyboardEvent) -> bool {
+        self.device_manager.lock().unwrap().inject_keyboard(event)
+    }
+
+    /// Inject mouse event into the VM's i8042 device (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
+    pub fn inject_mouse(&self, event: &devices::legacy::MouseEvent) -> bool {
+        self.device_manager.lock().unwrap().inject_mouse(event)
+    }
+
+    /// Get reference to device manager for accessing device state
+    pub fn device_manager(&self) -> Arc<Mutex<DeviceManager>> {
+        self.device_manager.clone()
     }
 
     pub fn memory_manager_data(&self) -> MemoryManagerSnapshotData {

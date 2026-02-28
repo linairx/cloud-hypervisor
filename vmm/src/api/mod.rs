@@ -49,6 +49,7 @@ pub use self::http::{start_http_fd_thread, start_http_path_thread};
 use crate::Error as VmmError;
 use crate::config::RestoreConfig;
 use crate::device_tree::DeviceTree;
+use crate::input::InputRequest;
 use crate::vm::{Error as VmError, VmState};
 use crate::vm_config::{
     DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, NetConfig, PmemConfig,
@@ -205,6 +206,34 @@ pub enum ApiError {
     /// Error triggering NMI
     #[error("Error triggering NMI")]
     VmNmi(#[source] VmError),
+
+    /// Error injecting input
+    #[error("Error injecting input")]
+    VmInjectInput(#[source] VmError),
+
+    /// Error getting frame info
+    #[error("Error getting frame info")]
+    VmFrameInfo(#[source] VmError),
+
+    /// Error starting frame capture
+    #[error("Error starting frame capture")]
+    VmFrameCaptureStart(#[source] VmError),
+
+    /// Error stopping frame capture
+    #[error("Error stopping frame capture")]
+    VmFrameCaptureStop(#[source] VmError),
+
+    /// Error getting frame capture status
+    #[error("Error getting frame capture status")]
+    VmFrameCaptureStatus(#[source] VmError),
+
+    /// Error setting frame capture format
+    #[error("Error setting frame capture format")]
+    VmFrameCaptureSetFormat(#[source] VmError),
+
+    /// Error getting cursor info
+    #[error("Error getting cursor info")]
+    VmCursorInfo(#[source] VmError),
 }
 pub type ApiResult<T> = Result<T, ApiError>;
 
@@ -275,6 +304,90 @@ pub struct VmSendMigrationData {
     pub local: bool,
 }
 
+/// Input injection statistics response
+#[derive(Clone, Deserialize, Serialize, Default, Debug)]
+pub struct VmInjectInputResponse {
+    /// Number of keyboard events injected
+    pub keyboard_events: u64,
+    /// Number of mouse events injected
+    pub mouse_events: u64,
+    /// Total events injected
+    pub total_events: u64,
+    /// Number of errors during injection
+    pub errors: u64,
+}
+
+/// Frame buffer information response
+#[derive(Clone, Deserialize, Serialize, Default, Debug)]
+pub struct VmFrameInfoResponse {
+    /// Frame width in pixels
+    pub width: u32,
+    /// Frame height in pixels
+    pub height: u32,
+    /// Frame format (e.g., "XRGB8888", "ARGB8888")
+    pub format: String,
+    /// Number of buffers in the buffer pool
+    pub buffer_count: u32,
+    /// Current frame number
+    pub frame_number: u64,
+    /// Current active buffer index
+    pub active_index: u32,
+}
+
+/// Frame capture status response
+#[derive(Clone, Deserialize, Serialize, Default, Debug)]
+pub struct VmFrameCaptureStatusResponse {
+    /// Whether capture is active
+    pub capturing: bool,
+    /// Current guest state
+    pub guest_state: String,
+    /// Current command
+    pub command: String,
+    /// Guest agent PID (0 if not set)
+    pub guest_pid: u32,
+    /// Total frames captured
+    pub frame_count: u64,
+    /// Frame dimensions
+    pub width: u32,
+    pub height: u32,
+    /// Frame format
+    pub format: String,
+}
+
+/// Frame capture format configuration
+#[derive(Clone, Deserialize, Serialize, Default, Debug)]
+pub struct VmFrameCaptureFormat {
+    /// Frame width in pixels
+    pub width: u32,
+    /// Frame height in pixels
+    pub height: u32,
+    /// Frame format (e.g., "BGRA32", "RGBA32", "NV12")
+    pub format: String,
+}
+
+/// Cursor information response
+#[derive(Clone, Deserialize, Serialize, Default, Debug)]
+pub struct VmCursorInfoResponse {
+    /// Cursor X position in pixels
+    pub x: i32,
+    /// Cursor Y position in pixels
+    pub y: i32,
+    /// Whether the cursor is visible
+    pub visible: bool,
+    /// Cursor width in pixels
+    pub width: u16,
+    /// Cursor height in pixels
+    pub height: u16,
+    /// Cursor hotspot X offset
+    pub hot_x: i16,
+    /// Cursor hotspot Y offset
+    pub hot_y: i16,
+    /// Whether cursor shape data is available
+    pub has_shape: bool,
+    /// Cursor update counter
+    pub update_count: u32,
+}
+
 pub enum ApiResponsePayload {
     /// No data is sent on the channel.
     Empty,
@@ -287,6 +400,18 @@ pub enum ApiResponsePayload {
 
     /// Vm action response
     VmAction(Option<Vec<u8>>),
+
+    /// Vm inject input response
+    VmInjectInput(VmInjectInputResponse),
+
+    /// Vm frame info response
+    VmFrameInfo(VmFrameInfoResponse),
+
+    /// Vm frame capture status response
+    VmFrameCaptureStatus(VmFrameCaptureStatusResponse),
+
+    /// Vm cursor info response
+    VmCursorInfo(VmCursorInfoResponse),
 }
 
 /// This is the response sent by the VMM API server through the mpsc channel.
@@ -372,6 +497,20 @@ pub trait RequestHandler {
     ) -> Result<(), MigratableError>;
 
     fn vm_nmi(&mut self) -> Result<(), VmError>;
+
+    fn vm_inject_input(&mut self, input_request: InputRequest) -> Result<VmInjectInputResponse, VmError>;
+
+    fn vm_frame_info(&self) -> Result<VmFrameInfoResponse, VmError>;
+
+    fn vm_frame_capture_start(&mut self) -> Result<(), VmError>;
+
+    fn vm_frame_capture_stop(&mut self) -> Result<(), VmError>;
+
+    fn vm_frame_capture_status(&self) -> Result<VmFrameCaptureStatusResponse, VmError>;
+
+    fn vm_frame_capture_set_format(&mut self, format: VmFrameCaptureFormat) -> Result<(), VmError>;
+
+    fn vm_cursor_info(&self) -> Result<VmCursorInfoResponse, VmError>;
 }
 
 /// It would be nice if we could pass around an object like this:
@@ -1539,5 +1678,259 @@ impl ApiAction for VmNmi {
         data: Self::RequestBody,
     ) -> ApiResult<Self::ResponseBody> {
         get_response_body(self, api_evt, api_sender, data)
+    }
+}
+
+pub struct VmInjectInput;
+
+impl ApiAction for VmInjectInput {
+    type RequestBody = InputRequest;
+    type ResponseBody = VmInjectInputResponse;
+
+    fn request(&self, input_request: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            info!("API request event: VmInjectInput");
+
+            let response = vmm
+                .vm_inject_input(input_request)
+                .map_err(ApiError::VmInjectInput)
+                .map(ApiResponsePayload::VmInjectInput);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        let response = get_response(self, api_evt, api_sender, data)?;
+
+        match response {
+            ApiResponsePayload::VmInjectInput(stats) => Ok(stats),
+            _ => Err(ApiError::ResponsePayloadType),
+        }
+    }
+}
+
+pub struct VmFrameInfo;
+
+impl ApiAction for VmFrameInfo {
+    type RequestBody = ();
+    type ResponseBody = VmFrameInfoResponse;
+
+    fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            info!("API request event: VmFrameInfo");
+
+            let response = vmm
+                .vm_frame_info()
+                .map_err(ApiError::VmFrameInfo)
+                .map(ApiResponsePayload::VmFrameInfo);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        let response = get_response(self, api_evt, api_sender, data)?;
+
+        match response {
+            ApiResponsePayload::VmFrameInfo(info) => Ok(info),
+            _ => Err(ApiError::ResponsePayloadType),
+        }
+    }
+}
+
+pub struct VmFrameCaptureStart;
+
+impl ApiAction for VmFrameCaptureStart {
+    type RequestBody = ();
+    type ResponseBody = ();
+
+    fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            info!("API request event: VmFrameCaptureStart");
+
+            let response = vmm
+                .vm_frame_capture_start()
+                .map_err(ApiError::VmFrameCaptureStart)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response(self, api_evt, api_sender, data)?;
+        Ok(())
+    }
+}
+
+pub struct VmFrameCaptureStop;
+
+impl ApiAction for VmFrameCaptureStop {
+    type RequestBody = ();
+    type ResponseBody = ();
+
+    fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            info!("API request event: VmFrameCaptureStop");
+
+            let response = vmm
+                .vm_frame_capture_stop()
+                .map_err(ApiError::VmFrameCaptureStop)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response(self, api_evt, api_sender, data)?;
+        Ok(())
+    }
+}
+
+pub struct VmFrameCaptureStatus;
+
+impl ApiAction for VmFrameCaptureStatus {
+    type RequestBody = ();
+    type ResponseBody = VmFrameCaptureStatusResponse;
+
+    fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            info!("API request event: VmFrameCaptureStatus");
+
+            let response = vmm
+                .vm_frame_capture_status()
+                .map_err(ApiError::VmFrameCaptureStatus)
+                .map(ApiResponsePayload::VmFrameCaptureStatus);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        let response = get_response(self, api_evt, api_sender, data)?;
+
+        match response {
+            ApiResponsePayload::VmFrameCaptureStatus(status) => Ok(status),
+            _ => Err(ApiError::ResponsePayloadType),
+        }
+    }
+}
+
+pub struct VmFrameCaptureSetFormat;
+
+impl ApiAction for VmFrameCaptureSetFormat {
+    type RequestBody = VmFrameCaptureFormat;
+    type ResponseBody = ();
+
+    fn request(&self, format: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            info!("API request event: VmFrameCaptureSetFormat {:?}", format);
+
+            let response = vmm
+                .vm_frame_capture_set_format(format)
+                .map_err(ApiError::VmFrameCaptureSetFormat)
+                .map(|_| ApiResponsePayload::Empty);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        get_response(self, api_evt, api_sender, data)?;
+        Ok(())
+    }
+}
+
+pub struct VmCursorInfo;
+
+impl ApiAction for VmCursorInfo {
+    type RequestBody = ();
+    type ResponseBody = VmCursorInfoResponse;
+
+    fn request(&self, _: Self::RequestBody, response_sender: Sender<ApiResponse>) -> ApiRequest {
+        Box::new(move |vmm| {
+            info!("API request event: VmCursorInfo");
+
+            let response = vmm
+                .vm_cursor_info()
+                .map_err(ApiError::VmCursorInfo)
+                .map(ApiResponsePayload::VmCursorInfo);
+
+            response_sender
+                .send(response)
+                .map_err(VmmError::ApiResponseSend)?;
+
+            Ok(false)
+        })
+    }
+
+    fn send(
+        &self,
+        api_evt: EventFd,
+        api_sender: Sender<ApiRequest>,
+        data: Self::RequestBody,
+    ) -> ApiResult<Self::ResponseBody> {
+        let response = get_response(self, api_evt, api_sender, data)?;
+
+        match response {
+            ApiResponsePayload::VmCursorInfo(info) => Ok(info),
+            _ => Err(ApiError::ResponsePayloadType),
+        }
     }
 }

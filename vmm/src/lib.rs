@@ -77,6 +77,7 @@ pub mod device_tree;
 mod gdb;
 #[cfg(feature = "igvm")]
 mod igvm;
+pub mod input;
 pub mod interrupt;
 pub mod landlock;
 pub mod memory_manager;
@@ -2290,6 +2291,249 @@ impl RequestHandler for Vmm {
         } else {
             Err(VmError::VmNotRunning)
         }
+    }
+
+    fn vm_inject_input(
+        &mut self,
+        input_request: crate::input::InputRequest,
+    ) -> result::Result<crate::api::VmInjectInputResponse, VmError> {
+        use crate::api::VmInjectInputResponse;
+        use crate::input::KeyboardAction;
+
+        let vm = self.vm.as_ref().ok_or(VmError::VmNotRunning)?;
+
+        let mut keyboard_events = 0u64;
+        let mut mouse_events = 0u64;
+        let mut errors = 0u64;
+
+        // Inject keyboard events
+        for event in &input_request.keyboard {
+            let release = match event.action {
+                KeyboardAction::Press | KeyboardAction::Type => false,
+                KeyboardAction::Release => true,
+            };
+            // Convert code to PS/2 scancode (lower byte for Set 2)
+            let scancode = event.code as u8;
+
+            let i8042_event = devices::legacy::KeyboardEvent { scancode, release };
+
+            if vm.inject_keyboard(&i8042_event) {
+                keyboard_events += 1;
+            } else {
+                errors += 1;
+                warn!("Failed to inject keyboard event: scancode={:02x}", scancode);
+            }
+        }
+
+        // Inject mouse events
+        for event in &input_request.mouse {
+            // Build mouse buttons from event
+            let buttons = devices::legacy::MouseButtons {
+                left: event.button == Some(crate::input::MouseButton::Left),
+                right: event.button == Some(crate::input::MouseButton::Right),
+                middle: event.button == Some(crate::input::MouseButton::Middle),
+            };
+
+            // Convert coordinates (clamp to i16 range)
+            let dx = event.x.clamp(-255, 255) as i16;
+            let dy = event.y.clamp(-255, 255) as i16;
+            let dz = event.z.clamp(-8, 7) as i8;
+
+            let i8042_event = devices::legacy::MouseEvent {
+                dx,
+                dy,
+                dz,
+                buttons,
+            };
+
+            if vm.inject_mouse(&i8042_event) {
+                mouse_events += 1;
+            } else {
+                errors += 1;
+                warn!("Failed to inject mouse event: dx={}, dy={}", dx, dy);
+            }
+        }
+
+        info!(
+            "Injected input: {} keyboard events, {} mouse events, {} errors",
+            keyboard_events, mouse_events, errors
+        );
+
+        Ok(VmInjectInputResponse {
+            keyboard_events,
+            mouse_events,
+            total_events: keyboard_events + mouse_events,
+            errors,
+        })
+    }
+
+    fn vm_frame_info(&self) -> result::Result<crate::api::VmFrameInfoResponse, VmError> {
+        use crate::api::VmFrameInfoResponse;
+
+        if self.vm.is_none() {
+            return Err(VmError::VmNotRunning);
+        }
+
+        #[cfg(feature = "ivshmem")]
+        {
+            // Get frame buffer info from device manager
+            let vm = self.vm.as_ref().unwrap();
+            let device_manager = vm.device_manager();
+
+            if let Some((width, height, format, buffer_count, frame_number, active_index)) =
+                device_manager.lock().unwrap().frame_buffer_info()
+            {
+                return Ok(VmFrameInfoResponse {
+                    width,
+                    height,
+                    format,
+                    buffer_count,
+                    frame_number,
+                    active_index,
+                });
+            }
+        }
+
+        // Return default/empty response if frame buffer is not configured
+        Ok(VmFrameInfoResponse {
+            width: 0,
+            height: 0,
+            format: String::new(),
+            buffer_count: 0,
+            frame_number: 0,
+            active_index: 0,
+        })
+    }
+
+    fn vm_frame_capture_start(&mut self) -> result::Result<(), VmError> {
+        if self.vm.is_none() {
+            return Err(VmError::VmNotRunning);
+        }
+
+        #[cfg(feature = "ivshmem")]
+        {
+            // Get device manager and send start capture command
+            let vm = self.vm.as_ref().unwrap();
+            let device_manager = vm.device_manager();
+
+            if let Some(status) = device_manager.lock().unwrap().frame_capture_start() {
+                info!("Frame capture started: {:?}", status);
+                return Ok(());
+            } else {
+                return Err(VmError::FrameBufferNotConfigured);
+            }
+        }
+
+        #[cfg(not(feature = "ivshmem"))]
+        {
+            Err(VmError::FrameBufferNotConfigured)
+        }
+    }
+
+    fn vm_frame_capture_stop(&mut self) -> result::Result<(), VmError> {
+        if self.vm.is_none() {
+            return Err(VmError::VmNotRunning);
+        }
+
+        #[cfg(feature = "ivshmem")]
+        {
+            // Get device manager and send stop capture command
+            let vm = self.vm.as_ref().unwrap();
+            let device_manager = vm.device_manager();
+
+            if let Some(status) = device_manager.lock().unwrap().frame_capture_stop() {
+                info!("Frame capture stopped: {:?}", status);
+                return Ok(());
+            } else {
+                return Err(VmError::FrameBufferNotConfigured);
+            }
+        }
+
+        #[cfg(not(feature = "ivshmem"))]
+        {
+            Err(VmError::FrameBufferNotConfigured)
+        }
+    }
+
+    fn vm_frame_capture_status(&self) -> result::Result<crate::api::VmFrameCaptureStatusResponse, VmError> {
+        use crate::api::VmFrameCaptureStatusResponse;
+
+        if self.vm.is_none() {
+            return Err(VmError::VmNotRunning);
+        }
+
+        #[cfg(feature = "ivshmem")]
+        {
+            // Get frame capture status from device manager
+            let vm = self.vm.as_ref().unwrap();
+            let device_manager = vm.device_manager();
+
+            if let Some(status) = device_manager.lock().unwrap().frame_capture_status() {
+                return Ok(status);
+            }
+        }
+
+        // Return default/empty response if frame buffer is not configured
+        Ok(VmFrameCaptureStatusResponse {
+            capturing: false,
+            guest_state: "unknown".to_string(),
+            command: "none".to_string(),
+            guest_pid: 0,
+            frame_count: 0,
+            width: 0,
+            height: 0,
+            format: String::new(),
+        })
+    }
+
+    fn vm_frame_capture_set_format(
+        &mut self,
+        format: crate::api::VmFrameCaptureFormat,
+    ) -> result::Result<(), VmError> {
+        if self.vm.is_none() {
+            return Err(VmError::VmNotRunning);
+        }
+
+        #[cfg(feature = "ivshmem")]
+        {
+            // Get device manager and set format
+            let vm = self.vm.as_ref().unwrap();
+            let device_manager = vm.device_manager();
+
+            if device_manager.lock().unwrap().frame_capture_set_format(&format) {
+                info!("Frame capture format set: {:?}", format);
+                return Ok(());
+            } else {
+                return Err(VmError::FrameBufferNotConfigured);
+            }
+        }
+
+        #[cfg(not(feature = "ivshmem"))]
+        {
+            Err(VmError::FrameBufferNotConfigured)
+        }
+    }
+
+    fn vm_cursor_info(&self) -> result::Result<crate::api::VmCursorInfoResponse, VmError> {
+        use crate::api::VmCursorInfoResponse;
+
+        if self.vm.is_none() {
+            return Err(VmError::VmNotRunning);
+        }
+
+        #[cfg(feature = "ivshmem")]
+        {
+            // Get cursor info from device manager
+            let vm = self.vm.as_ref().unwrap();
+            let device_manager = vm.device_manager();
+
+            if let Some(cursor_info) = device_manager.lock().unwrap().cursor_info() {
+                return Ok(cursor_info);
+            }
+        }
+
+        // Return default/empty response if cursor is not available
+        Ok(VmCursorInfoResponse::default())
     }
 
     fn vm_receive_migration(

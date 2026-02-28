@@ -47,9 +47,9 @@ use crate::api::http::{EndpointHandler, HttpError, error_response};
 use crate::api::{
     AddDisk, ApiAction, ApiError, ApiRequest, NetConfig, VmAddDevice, VmAddFs,
     VmAddGenericVhostUser, VmAddNet, VmAddPmem, VmAddUserDevice, VmAddVdpa, VmAddVsock, VmBoot,
-    VmConfig, VmCounters, VmDelete, VmNmi, VmPause, VmPowerButton, VmReboot, VmReceiveMigration,
-    VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume, VmSendMigration,
-    VmShutdown, VmSnapshot,
+    VmConfig, VmCounters, VmDelete, VmInjectInput, VmNmi, VmPause, VmPowerButton, VmReboot,
+    VmReceiveMigration, VmRemoveDevice, VmResize, VmResizeDisk, VmResizeZone, VmRestore, VmResume,
+    VmSendMigration, VmShutdown, VmSnapshot,
 };
 use crate::config::RestoreConfig;
 use crate::cpu::Error as CpuError;
@@ -435,6 +435,32 @@ vm_action_put_handler_body!(VmSendMigration);
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 vm_action_put_handler_body!(VmCoredump);
 
+// VmInjectInput handler - returns statistics as JSON body
+impl PutHandler for VmInjectInput {
+    fn handle_request(
+        &'static self,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+        body: &Option<Body>,
+        _files: Vec<File>,
+    ) -> std::result::Result<Option<Body>, HttpError> {
+        if let Some(body) = body {
+            let stats = self
+                .send(
+                    api_notifier,
+                    api_sender,
+                    serde_json::from_slice(body.raw())?,
+                )
+                .map_err(HttpError::ApiError)?;
+            Ok(Some(Body::new(serde_json::to_string(&stats)?)))
+        } else {
+            Err(HttpError::BadRequest)
+        }
+    }
+}
+
+impl GetHandler for VmInjectInput {}
+
 // Special handling for virtio-net devices backed by network FDs.
 // See module description for more info.
 impl PutHandler for VmAddNet {
@@ -627,6 +653,222 @@ impl EndpointHandler for VmmShutdown {
                     Err(e) => error_response(e, StatusCode::InternalServerError),
                 }
             }
+            _ => error_response(HttpError::BadRequest, StatusCode::BadRequest),
+        }
+    }
+}
+
+// /api/v1/vm.inject-input handler
+pub struct VmInjectInputHandler {}
+
+impl EndpointHandler for VmInjectInputHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+    ) -> Response {
+        match req.method() {
+            Method::Put => {
+                match &req.body {
+                    Some(body) => {
+                        // Deserialize the input request
+                        let input_request: crate::input::InputRequest =
+                            match serde_json::from_slice(body.raw())
+                                .map_err(HttpError::SerdeJsonDeserialize)
+                            {
+                                Ok(config) => config,
+                                Err(e) => return error_response(e, StatusCode::BadRequest),
+                            };
+
+                        match crate::api::VmInjectInput
+                            .send(api_notifier, api_sender, input_request)
+                            .map_err(HttpError::ApiError)
+                        {
+                            Ok(stats) => {
+                                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                                let stats_serialized = serde_json::to_string(&stats).unwrap();
+                                response.set_body(Body::new(stats_serialized));
+                                response
+                            }
+                            Err(e) => error_response(e, StatusCode::InternalServerError),
+                        }
+                    }
+                    None => Response::new(Version::Http11, StatusCode::BadRequest),
+                }
+            }
+            _ => error_response(HttpError::BadRequest, StatusCode::BadRequest),
+        }
+    }
+}
+
+// /api/v1/vm.frame-info handler
+pub struct VmFrameInfo {}
+
+impl EndpointHandler for VmFrameInfo {
+    fn handle_request(
+        &self,
+        req: &Request,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+    ) -> Response {
+        match req.method() {
+            Method::Get => match crate::api::VmFrameInfo
+                .send(api_notifier, api_sender, ())
+                .map_err(HttpError::ApiError)
+            {
+                Ok(info) => {
+                    let mut response = Response::new(Version::Http11, StatusCode::OK);
+                    let info_serialized = serde_json::to_string(&info).unwrap();
+
+                    response.set_body(Body::new(info_serialized));
+                    response
+                }
+                Err(e) => error_response(e, StatusCode::InternalServerError),
+            },
+            _ => error_response(HttpError::BadRequest, StatusCode::BadRequest),
+        }
+    }
+}
+
+// /api/v1/vm.frame-capture/start handler
+pub struct VmFrameCaptureStart {}
+
+impl EndpointHandler for VmFrameCaptureStart {
+    fn handle_request(
+        &self,
+        req: &Request,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+    ) -> Response {
+        match req.method() {
+            Method::Put => match crate::api::VmFrameCaptureStart
+                .send(api_notifier, api_sender, ())
+                .map_err(HttpError::ApiError)
+            {
+                Ok(()) => Response::new(Version::Http11, StatusCode::NoContent),
+                Err(e) => error_response(e, StatusCode::InternalServerError),
+            },
+            _ => error_response(HttpError::BadRequest, StatusCode::BadRequest),
+        }
+    }
+}
+
+// /api/v1/vm.frame-capture/stop handler
+pub struct VmFrameCaptureStop {}
+
+impl EndpointHandler for VmFrameCaptureStop {
+    fn handle_request(
+        &self,
+        req: &Request,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+    ) -> Response {
+        match req.method() {
+            Method::Put => match crate::api::VmFrameCaptureStop
+                .send(api_notifier, api_sender, ())
+                .map_err(HttpError::ApiError)
+            {
+                Ok(()) => Response::new(Version::Http11, StatusCode::NoContent),
+                Err(e) => error_response(e, StatusCode::InternalServerError),
+            },
+            _ => error_response(HttpError::BadRequest, StatusCode::BadRequest),
+        }
+    }
+}
+
+// /api/v1/vm.frame-capture/status handler
+pub struct VmFrameCaptureStatus {}
+
+impl EndpointHandler for VmFrameCaptureStatus {
+    fn handle_request(
+        &self,
+        req: &Request,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+    ) -> Response {
+        match req.method() {
+            Method::Get => match crate::api::VmFrameCaptureStatus
+                .send(api_notifier, api_sender, ())
+                .map_err(HttpError::ApiError)
+            {
+                Ok(status) => {
+                    let mut response = Response::new(Version::Http11, StatusCode::OK);
+                    let status_serialized = serde_json::to_string(&status).unwrap();
+
+                    response.set_body(Body::new(status_serialized));
+                    response
+                }
+                Err(e) => error_response(e, StatusCode::InternalServerError),
+            },
+            _ => error_response(HttpError::BadRequest, StatusCode::BadRequest),
+        }
+    }
+}
+
+// /api/v1/vm.frame-capture/set-format handler
+pub struct VmFrameCaptureSetFormat {}
+
+impl EndpointHandler for VmFrameCaptureSetFormat {
+    fn handle_request(
+        &self,
+        req: &Request,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+    ) -> Response {
+        match req.method() {
+            Method::Put => {
+                match &req.body {
+                    Some(body) => {
+                        // Deserialize the format configuration
+                        let format_config: crate::api::VmFrameCaptureFormat =
+                            match serde_json::from_slice(body.raw())
+                                .map_err(HttpError::SerdeJsonDeserialize)
+                            {
+                                Ok(config) => config,
+                                Err(e) => return error_response(e, StatusCode::BadRequest),
+                            };
+
+                        match crate::api::VmFrameCaptureSetFormat
+                            .send(api_notifier, api_sender, format_config)
+                            .map_err(HttpError::ApiError)
+                        {
+                            Ok(()) => Response::new(Version::Http11, StatusCode::NoContent),
+                            Err(e) => error_response(e, StatusCode::InternalServerError),
+                        }
+                    }
+                    None => Response::new(Version::Http11, StatusCode::BadRequest),
+                }
+            }
+            _ => error_response(HttpError::BadRequest, StatusCode::BadRequest),
+        }
+    }
+}
+
+// /api/v1/vm.cursor-info handler
+pub struct VmCursorInfo {}
+
+impl EndpointHandler for VmCursorInfo {
+    fn handle_request(
+        &self,
+        req: &Request,
+        api_notifier: EventFd,
+        api_sender: Sender<ApiRequest>,
+    ) -> Response {
+        match req.method() {
+            Method::Get => match crate::api::VmCursorInfo
+                .send(api_notifier, api_sender, ())
+                .map_err(HttpError::ApiError)
+            {
+                Ok(info) => {
+                    let mut response = Response::new(Version::Http11, StatusCode::OK);
+                    let info_serialized = serde_json::to_string(&info).unwrap();
+
+                    response.set_body(Body::new(info_serialized));
+                    response
+                }
+                Err(e) => error_response(e, StatusCode::InternalServerError),
+            },
             _ => error_response(HttpError::BadRequest, StatusCode::BadRequest),
         }
     }
