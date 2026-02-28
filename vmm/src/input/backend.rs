@@ -261,3 +261,202 @@ impl BackendType {
         }
     }
 }
+
+// ============================================================================
+// USB HID Backend
+// ============================================================================
+
+/// USB HID input backend
+///
+/// This backend emulates a USB Human Interface Device (HID) for keyboard
+/// and mouse input. It provides medium stealth level as USB devices are
+/// common but can be identified as emulated with careful inspection.
+pub struct UsbHidBackend {
+    capabilities: InputCapabilities,
+    ready: bool,
+    /// Keyboard LED state
+    keyboard_leds: u8,
+    /// Mouse button state
+    mouse_buttons: u8,
+}
+
+impl UsbHidBackend {
+    /// Create a new USB HID backend
+    pub fn new() -> Self {
+        Self {
+            capabilities: InputCapabilities {
+                max_keyboard_rate: 1000,
+                supports_absolute_mouse: true,
+                supports_multi_touch: false,
+                supports_scroll_wheel: true,
+                max_scroll_range: 127,
+                stealth_level: StealthLevel::Medium,
+                name: "usb-hid",
+                description: "USB Human Interface Device (keyboard + mouse)",
+            },
+            ready: false,
+            keyboard_leds: 0,
+            mouse_buttons: 0,
+        }
+    }
+
+    /// Set ready state
+    pub fn set_ready(&mut self, ready: bool) {
+        self.ready = ready;
+    }
+
+    /// Get keyboard LED state
+    pub fn keyboard_leds(&self) -> u8 {
+        self.keyboard_leds
+    }
+
+    /// Get mouse button state
+    pub fn mouse_buttons(&self) -> u8 {
+        self.mouse_buttons
+    }
+
+    /// Convert keyboard event to USB HID report
+    fn keyboard_to_hid_report(&self, event: &KeyboardEvent) -> [u8; 8] {
+        // Standard USB HID keyboard report: modifier + reserved + 6 key codes
+        let mut report = [0u8; 8];
+
+        // Modifier byte (bit 0-7: LCtrl, LShift, LAlt, LGui, RCtrl, RShift, RAlt, RGui)
+        if event.modifiers.ctrl {
+            report[0] |= 0x01; // Left Ctrl
+        }
+        if event.modifiers.shift {
+            report[0] |= 0x02; // Left Shift
+        }
+        if event.modifiers.alt {
+            report[0] |= 0x04; // Left Alt
+        }
+        if event.modifiers.meta {
+            report[0] |= 0x08; // Left GUI
+        }
+
+        // Key code (position 2-7 can hold up to 6 simultaneous keys)
+        // Only set key on press, clear on release
+        match event.action {
+            super::event::KeyboardAction::Press | super::event::KeyboardAction::Type => {
+                // Convert scancode to HID usage code (simplified)
+                let hid_code = self.scancode_to_hid(event.code);
+                report[2] = hid_code;
+            }
+            super::event::KeyboardAction::Release => {
+                // Release: no key code in report
+            }
+        }
+
+        report
+    }
+
+    /// Convert PS/2 scancode to USB HID usage code
+    fn scancode_to_hid(&self, scancode: u16) -> u8 {
+        // Simplified mapping - PS/2 Set 1 to USB HID
+        match scancode {
+            0x01 => 0x29, // Escape
+            0x02..=0x0B => (scancode - 0x02 + 0x1E) as u8, // 1-0
+            0x0E => 0x2A, // Backspace
+            0x0F => 0x2B, // Tab
+            0x1E..=0x26 => (scancode - 0x1E + 0x04) as u8, // Q-P
+            0x1C => 0x28, // Enter
+            0x2A => 0xE1, // Left Shift
+            0x1D => 0xE0, // Left Ctrl
+            0x38 => 0xE2, // Left Alt
+            0x39 => 0x2C, // Space
+            _ => scancode as u8, // Fallback
+        }
+    }
+
+    /// Convert mouse event to USB HID report
+    fn mouse_to_hid_report(&mut self, event: &MouseEvent) -> [u8; 6] {
+        // Standard USB HID mouse report: buttons + X + Y + wheel
+        let mut report = [0u8; 6];
+
+        // Button byte
+        if event.buttons.left {
+            report[0] |= 0x01;
+        }
+        if event.buttons.right {
+            report[0] |= 0x02;
+        }
+        if event.buttons.middle {
+            report[0] |= 0x04;
+        }
+
+        // Handle button actions
+        if let Some(ref btn) = event.button {
+            let mask = match btn {
+                super::event::MouseButton::Left => 0x01,
+                super::event::MouseButton::Right => 0x02,
+                super::event::MouseButton::Middle => 0x04,
+                super::event::MouseButton::Side => 0x08,
+                super::event::MouseButton::Extra => 0x10,
+            };
+            match event.action {
+                super::event::MouseAction::ButtonPress | super::event::MouseAction::Click => {
+                    report[0] |= mask;
+                }
+                super::event::MouseAction::ButtonRelease => {
+                    report[0] &= !mask;
+                }
+                _ => {}
+            }
+        }
+
+        // Relative movement (signed 8-bit)
+        report[1] = event.x.clamp(-127, 127) as u8;
+        report[2] = event.y.clamp(-127, 127) as u8;
+
+        // Scroll wheel
+        report[3] = event.z.clamp(-127, 127) as u8;
+
+        report
+    }
+}
+
+impl Default for UsbHidBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InputBackend for UsbHidBackend {
+    fn name(&self) -> &'static str {
+        self.capabilities.name
+    }
+
+    fn capabilities(&self) -> InputCapabilities {
+        self.capabilities.clone()
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    fn inject_keyboard(&mut self, event: &KeyboardEvent) -> Result<()> {
+        if !self.ready {
+            return Err(InputError::DeviceNotReady);
+        }
+
+        // Generate HID report
+        let _report = self.keyboard_to_hid_report(event);
+
+        // TODO: Send report to xHCI controller / USB device
+        // This will be implemented when xHCI controller is added
+        Ok(())
+    }
+
+    fn inject_mouse(&mut self, event: &MouseEvent) -> Result<()> {
+        if !self.ready {
+            return Err(InputError::DeviceNotReady);
+        }
+
+        // Generate HID report
+        let _report = self.mouse_to_hid_report(event);
+
+        // TODO: Send report to xHCI controller / USB device
+        // This will be implemented when xHCI controller is added
+        Ok(())
+    }
+}

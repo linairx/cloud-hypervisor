@@ -21,6 +21,7 @@ pub mod balloon;
 pub mod block;
 mod console;
 pub mod epoll_helper;
+pub mod gpu;
 mod input;
 mod iommu;
 pub mod mem;
@@ -58,6 +59,7 @@ pub use self::rng::Rng;
 pub use self::vdpa::{Vdpa, VdpaDmaMapping};
 pub use self::vsock::Vsock;
 pub use self::watchdog::Watchdog;
+pub use self::gpu::{Gpu, GpuConfig};
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
 type GuestRegionMmap = vm_memory::GuestRegionMmap<AtomicBitmap>;

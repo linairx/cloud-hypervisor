@@ -21,6 +21,7 @@ members = [
   "cloud-hypervisor",
   "devices",
   "event_monitor",
+  "guest-agent",
   "hypervisor",
   "net_gen",
   "net_util",

@@ -1033,7 +1033,7 @@ pub struct DeviceManager {
     legacy_interrupt_manager: Option<Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>>,
 
     // Passthrough device handle
-    passthrough_device: Option<VfioDeviceFd>,
+    passthrough_device: Option<Arc<VfioDeviceFd>>,
 
     // VFIO container
     // Only one container can be created, therefore it is stored as part of the
@@ -1379,7 +1379,7 @@ impl DeviceManager {
             device_id_cnt,
             msi_interrupt_manager,
             legacy_interrupt_manager: None,
-            passthrough_device: None,
+            passthrough_device: None as Option<Arc<VfioDeviceFd>>,
             vfio_container: None,
             iommu_device: None,
             iommu_mapping: None,
@@ -4019,12 +4019,12 @@ impl DeviceManager {
         // If the passthrough device has not been created yet, it is created
         // here and stored in the DeviceManager structure for future needs.
         if self.passthrough_device.is_none() {
-            self.passthrough_device = Some(
+            self.passthrough_device = Some(Arc::new(
                 self.address_manager
                     .vm
                     .create_passthrough_device()
                     .map_err(|e| DeviceManagerError::CreatePassthroughDevice(e.into()))?,
-            );
+            ));
         }
 
         self.add_vfio_device(device_cfg)
@@ -4036,12 +4036,9 @@ impl DeviceManager {
             .as_ref()
             .ok_or(DeviceManagerError::NoDevicePassthroughSupport)?;
 
-        let dup = passthrough_device
-            .try_clone()
-            .map_err(DeviceManagerError::VfioCreate)?;
-
         Ok(Arc::new(
-            VfioContainer::new(Some(Arc::new(dup))).map_err(DeviceManagerError::VfioCreate)?,
+            VfioContainer::new(Some(Arc::clone(passthrough_device)))
+                .map_err(DeviceManagerError::VfioCreate)?,
         ))
     }
 

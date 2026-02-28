@@ -691,7 +691,7 @@ impl AudioFormat {
 
 /// Audio buffer header (placed after cursor data in shared memory)
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AudioBufferHeader {
     /// Magic number for validation: 0x41554449 ("AUDI")
     pub magic: u32,
@@ -773,6 +773,25 @@ impl AudioBufferHeader {
     /// Returns the total layout size including header and buffer
     pub fn total_layout_size(&self) -> usize {
         std::mem::size_of::<AudioBufferHeader>() + self.buffer_size as usize
+    }
+}
+
+impl Clone for AudioBufferHeader {
+    fn clone(&self) -> Self {
+        Self {
+            magic: self.magic,
+            version: self.version,
+            format: self.format,
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            reserved: self.reserved,
+            buffer_size: self.buffer_size,
+            write_pos: AtomicU32::new(self.write_pos.load(Ordering::Acquire)),
+            read_pos: AtomicU32::new(self.read_pos.load(Ordering::Acquire)),
+            total_written: AtomicU64::new(self.total_written.load(Ordering::Acquire)),
+            active: AtomicU32::new(self.active.load(Ordering::Acquire)),
+            reserved2: self.reserved2,
+        }
     }
 }
 

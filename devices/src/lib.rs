@@ -18,6 +18,8 @@ pub mod interrupt_controller;
 #[cfg(target_arch = "x86_64")]
 pub mod ioapic;
 #[cfg(feature = "ivshmem")]
+pub mod buffer_manager;
+#[cfg(feature = "ivshmem")]
 pub mod frame_buffer;
 #[cfg(feature = "ivshmem")]
 pub mod ivshmem;
@@ -25,6 +27,7 @@ pub mod legacy;
 #[cfg(feature = "pvmemcontrol")]
 pub mod pvmemcontrol;
 pub mod pvpanic;
+pub mod usb;
 // TODO: TPM is not yet supported
 #[cfg(not(target_arch = "riscv64"))]
 pub mod tpm;
@@ -32,6 +35,11 @@ pub mod tpm;
 use bitflags::bitflags;
 
 pub use self::acpi::{AcpiGedDevice, AcpiPmTimerDevice, AcpiShutdownDevice};
+#[cfg(feature = "ivshmem")]
+pub use self::buffer_manager::{
+    BufferConfig, BufferInfo, BufferManager, BufferProfile, BufferState, BufferStats,
+    MAX_BUFFER_COUNT, MIN_BUFFER_COUNT,
+};
 #[cfg(feature = "ivshmem")]
 pub use self::frame_buffer::{
     FrameBufferHeader, FrameBufferLayout, FrameFlags, FrameFormat, FrameMetadata,
