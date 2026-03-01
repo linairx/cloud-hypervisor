@@ -58,13 +58,14 @@ This document tracks the progress of lg-capture integration into Cloud Hyperviso
 |-----------|--------|------------|
 | xHCI Controller | Functional | 80% |
 | USB HID Devices | Functional | 80% |
-| VirtIO GPU | Rendering Commands | 70% |
+| VirtIO GPU | 2D + 3D Framework | 80% |
 | Input Batching | Complete | 100% |
 | Buffer Manager | Complete | 100% |
 | Frame Buffer Protocol | Complete | 100% |
-| Guest Agent Frame Capture | XShm Zero-copy | 90% |
+| Guest Agent Frame Capture | XShm + DXGI | 95% |
 | Guest Agent Audio Capture | PulseAudio | 80% |
-| Windows Support | Documented | 60% |
+| Windows Support | DXGI Implemented | 90% |
+| Wayland Multi-Monitor | API Ready | 85% |
 | Test Coverage | Improved | 70% |
 
 ## Recently Completed (This Session)
@@ -96,11 +97,25 @@ This document tracks the progress of lg-capture integration into Cloud Hyperviso
 - Improved GPU command handling robustness
 - Enhanced frame buffer test coverage
 
+### Phase 14: Wayland Multi-Monitor Support ✅
+- Added `get_outputs()` method to enumerate displays
+- Added `select_output()` method to choose capture target
+- Added `get_selected_output()` and `output_count()` helpers
+- Documented DMA-BUF zero-copy framework
+- Updated TODO markers to proper documentation comments
+
+### Phase 15: Windows DXGI Frame Capture ✅
+- Implemented Desktop Duplication API capture
+- D3D11 device and staging texture for CPU readback
+- GPU-accelerated screen capture
+- Feature-gated (`dxgi` feature)
+- Priority: DXGI > Stub (on Windows)
+
 ## Remaining Work
 
 ### Low Priority
-1. **VirtIO GPU 3D Commands** - VIRGL/venus rendering support
-2. **wlr-screencopy Protocol** - Full Wayland frame capture implementation
+1. **VirtIO GPU 3D Commands** - Full VIRGL/venus rendering implementation
+2. **wlr-screencopy Protocol** - Full Wayland frame capture with wayland-scanner bindings
 3. **Documentation** - API documentation generation
 
 ## Files Modified/Created

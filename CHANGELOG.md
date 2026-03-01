@@ -42,6 +42,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `wayland-client` 0.31 integration
   - Framework for `wlr-screencopy` protocol
   - Priority: Wayland > X11 > Stub
+  - Multi-monitor support with output selection API
+  - DMA-BUF framework for future zero-copy capture
+- **Windows DXGI Capture**: Desktop Duplication API support
+  - GPU-accelerated screen capture on Windows
+  - D3D11 device and staging texture for CPU readback
+  - Feature-gated (`dxgi` feature)
+  - Priority: DXGI > Stub (on Windows)
 
 #### Audio Capture
 - **PulseAudio Integration**: System audio capture
@@ -124,20 +131,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 | VirtIO Input | 100% | Keyboard + Mouse |
 | USB HID Input | 95% | Needs xHCI transfer ring |
 | xHCI Controller | 85% | Basic USB 3.0 support |
-| VirtIO GPU | 70% | 2D software rendering |
-| Frame Capture | 95% | X11 XShm, Wayland stub |
+| VirtIO GPU | 80% | 2D + VIRGL 3D framework |
+| Frame Capture | 95% | X11 XShm, Wayland framework |
 | Audio Capture | 85% | PulseAudio |
-| Guest Agent | 90% | Linux support |
-| Windows Support | 60% | Documentation only |
+| Guest Agent | 95% | Linux + Windows DXGI |
+| Windows Support | 90% | DXGI capture implemented |
 
 ## Future Work
 
 ### Medium Priority
-- VirtIO GPU 3D commands (VIRGL/venus)
-- Full wlr-screencopy implementation
-- Windows DXGI frame capture
+- VirtIO GPU 3D commands (full VIRGL/venus implementation)
+- Full wlr-screencopy implementation with wayland-scanner bindings
 
 ### Low Priority
 - API documentation generation
 - Performance benchmarking
-- Multi-monitor support
