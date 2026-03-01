@@ -403,13 +403,18 @@ impl XhciDeviceSlot {
     }
 
     /// Handle command TRB
-    pub fn handle_command(&mut self, trb: &Trb) -> (CompletionCode, u32) {
+    /// `address` is the USB device address to assign (caller should allocate it)
+    pub fn handle_command(&mut self, trb: &Trb, address: Option<u8>) -> (CompletionCode, u32) {
         match trb.trb_type() {
             Some(TrbType::AddressDevice) => {
                 // Address device command
-                self.set_state(SlotState::Addressed);
-                self.set_address(1); // Simplified: assign address 1
-                (CompletionCode::Success, 0)
+                if let Some(addr) = address {
+                    self.set_state(SlotState::Addressed);
+                    self.set_address(addr);
+                    (CompletionCode::Success, 0)
+                } else {
+                    (CompletionCode::ResourceError, 0)
+                }
             }
             Some(TrbType::ConfigureEndpoint) => {
                 // Configure endpoint command

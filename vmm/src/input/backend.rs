@@ -8,6 +8,7 @@
 
 use super::event::{InputEvent, KeyboardEvent, MouseEvent};
 use super::{InputError, Result};
+use devices::usb::hid::SharedUsbHidDevice;
 
 /// Stealth level indicates how detectable the input backend is
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -159,6 +160,14 @@ pub struct VirtioInputBackend {
     ready: bool,
     /// Reference to VirtIO Input device for injection
     device: Option<std::sync::Arc<std::sync::Mutex<virtio_devices::VirtioInput>>>,
+    /// Current absolute mouse position (X coordinate)
+    mouse_x: i32,
+    /// Current absolute mouse position (Y coordinate)
+    mouse_y: i32,
+    /// Screen dimensions for normalization (width)
+    screen_width: u32,
+    /// Screen dimensions for normalization (height)
+    screen_height: u32,
 }
 
 impl VirtioInputBackend {
@@ -177,6 +186,10 @@ impl VirtioInputBackend {
             },
             ready: false,
             device: None,
+            mouse_x: 0,
+            mouse_y: 0,
+            screen_width: 1920,  // Default screen width
+            screen_height: 1080, // Default screen height
         }
     }
 
@@ -188,6 +201,18 @@ impl VirtioInputBackend {
     /// Set the VirtIO Input device reference
     pub fn set_device(&mut self, device: std::sync::Arc<std::sync::Mutex<virtio_devices::VirtioInput>>) {
         self.device = Some(device);
+    }
+
+    /// Set screen dimensions for absolute positioning
+    pub fn set_screen_dimensions(&mut self, width: u32, height: u32) {
+        self.screen_width = width;
+        self.screen_height = height;
+    }
+
+    /// Reset mouse position tracking
+    pub fn reset_mouse_position(&mut self) {
+        self.mouse_x = 0;
+        self.mouse_y = 0;
     }
 
     /// Convert keyboard action to pressed boolean
@@ -275,10 +300,23 @@ impl InputBackend for VirtioInputBackend {
                         .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
                 }
                 super::event::MouseAction::MoveAbsolute => {
-                    // For absolute positioning, we need to track position and compute relative
-                    // This is a simplified implementation
-                    dev.inject_mouse_rel(event.x, event.y)
-                        .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
+                    // Clamp the target position to screen bounds
+                    let target_x = event.x.clamp(0, self.screen_width as i32);
+                    let target_y = event.y.clamp(0, self.screen_height as i32);
+
+                    // Compute relative movement from last tracked position
+                    let rel_x = target_x - self.mouse_x;
+                    let rel_y = target_y - self.mouse_y;
+
+                    // Update tracked position
+                    self.mouse_x = target_x;
+                    self.mouse_y = target_y;
+
+                    // Only send relative movement if there's actual movement
+                    if rel_x != 0 || rel_y != 0 {
+                        dev.inject_mouse_rel(rel_x, rel_y)
+                            .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
+                    }
                 }
                 super::event::MouseAction::ButtonPress | super::event::MouseAction::ButtonRelease => {
                     if let Some(ref button) = event.button {
@@ -363,6 +401,10 @@ pub struct UsbHidBackend {
     keyboard_leds: u8,
     /// Mouse button state
     mouse_buttons: u8,
+    /// Keyboard HID device reference
+    keyboard_device: Option<SharedUsbHidDevice>,
+    /// Mouse HID device reference
+    mouse_device: Option<SharedUsbHidDevice>,
 }
 
 impl UsbHidBackend {
@@ -382,12 +424,24 @@ impl UsbHidBackend {
             ready: false,
             keyboard_leds: 0,
             mouse_buttons: 0,
+            keyboard_device: None,
+            mouse_device: None,
         }
     }
 
     /// Set ready state
     pub fn set_ready(&mut self, ready: bool) {
         self.ready = ready;
+    }
+
+    /// Set keyboard HID device
+    pub fn set_keyboard_device(&mut self, device: SharedUsbHidDevice) {
+        self.keyboard_device = Some(device);
+    }
+
+    /// Set mouse HID device
+    pub fn set_mouse_device(&mut self, device: SharedUsbHidDevice) {
+        self.mouse_device = Some(device);
     }
 
     /// Get keyboard LED state
@@ -525,10 +579,15 @@ impl InputBackend for UsbHidBackend {
         }
 
         // Generate HID report
-        let _report = self.keyboard_to_hid_report(event);
+        let report = self.keyboard_to_hid_report(event);
 
-        // TODO: Send report to xHCI controller / USB device
-        // This will be implemented when xHCI controller is added
+        // Send to HID device
+        if let Some(ref device) = self.keyboard_device {
+            if let Ok(mut dev) = device.lock() {
+                dev.queue_report(report.to_vec());
+            }
+        }
+
         Ok(())
     }
 
@@ -538,10 +597,15 @@ impl InputBackend for UsbHidBackend {
         }
 
         // Generate HID report
-        let _report = self.mouse_to_hid_report(event);
+        let report = self.mouse_to_hid_report(event);
 
-        // TODO: Send report to xHCI controller / USB device
-        // This will be implemented when xHCI controller is added
+        // Send to HID device
+        if let Some(ref device) = self.mouse_device {
+            if let Ok(mut dev) = device.lock() {
+                dev.queue_report(report.to_vec());
+            }
+        }
+
         Ok(())
     }
 }

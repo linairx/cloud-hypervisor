@@ -40,7 +40,7 @@ bitflags = "2.4"
 
 # X11 capture (optional, Linux only)
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.12", features = ["shm", "allow-unsafe-code"] }
+x11rb = { version = "0.12", features = ["shm", "allow-unsafe-code", "xfixes"] }
 wayland-client = { version = "0.31", optional = true }
 libc = "0.2"
 libpulse-binding = { version = "2.0", optional = true }

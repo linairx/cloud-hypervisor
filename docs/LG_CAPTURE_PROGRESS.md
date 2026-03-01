@@ -98,14 +98,10 @@ This document tracks the progress of lg-capture integration into Cloud Hyperviso
 
 ## Remaining Work
 
-### Medium Priority
-1. **Guest Agent Cursor Capture** - Real cursor shape/position tracking
-2. **VirtIO GPU 3D Commands** - VIRGL/venus rendering support
-
 ### Low Priority
-3. **Wayland Capture** - Add Wayland backend for frame capture
-4. **Documentation** - API documentation generation
-5. **Integration Tests** - End-to-end testing framework
+1. **VirtIO GPU 3D Commands** - VIRGL/venus rendering support
+2. **wlr-screencopy Protocol** - Full Wayland frame capture implementation
+3. **Documentation** - API documentation generation
 
 ## Files Modified/Created
 

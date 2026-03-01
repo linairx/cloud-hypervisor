@@ -589,8 +589,180 @@ pub mod stub {
     }
 }
 
+/// Wayland capture backend
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+pub mod wayland {
+    use super::*;
+    use wayland_client::Connection;
+
+    /// Wayland capture backend using wlr-screencopy protocol
+    ///
+    /// This is a framework implementation. Full implementation requires:
+    /// - wlr-screencopy protocol binding
+    /// - DMA-BUF support for true zero-copy
+    /// - wl_output for display enumeration
+    /// - wl_surface for capture target
+    pub struct WaylandCapture {
+        /// Wayland connection
+        connection: Option<Connection>,
+        /// Current width
+        width: u32,
+        /// Current height
+        height: u32,
+        /// Frame format
+        format: FrameFormat,
+        /// Active state
+        active: bool,
+        /// Pre-allocated buffer for frame data
+        buffer: Vec<u8>,
+    }
+
+    // WaylandCapture is Send (buffer is only accessed within this struct)
+    unsafe impl Send for WaylandCapture {}
+
+    impl WaylandCapture {
+        /// Create a new Wayland capture backend
+        pub fn new() -> io::Result<Self> {
+            // Connect to Wayland compositor
+            let connection = Connection::connect_to_env().map_err(|e| {
+                io::Error::new(io::ErrorKind::ConnectionRefused, format!("{}", e))
+            })?;
+
+            log::info!("Connected to Wayland compositor");
+
+            Ok(Self {
+                connection: Some(connection),
+                width: 0,
+                height: 0,
+                format: FrameFormat::Bgra32,
+                active: false,
+                buffer: Vec::new(),
+            })
+        }
+
+        /// Get output dimensions (stub - requires wl_output implementation)
+        fn get_output_dimensions(&self) -> io::Result<(u32, u32)> {
+            // TODO: Implement using wl_output
+            // For now, return a default size
+            log::warn!("Wayland output dimensions not implemented, using default 1920x1080");
+            Ok((1920, 1080))
+        }
+
+        /// Initialize wlr-screencopy frame (stub - requires protocol implementation)
+        fn init_screencopy(&mut self) -> io::Result<()> {
+            // TODO: Register wlr-screencopy frame
+            // This would:
+            // 1. Get wlr-screencopy manager from registry
+            // 2. Create a capture frame for the output
+            // 3. Set up buffer for the frame (DMA-BUF or shared memory)
+            log::info!("wlr-screencopy initialization (stub)");
+            Ok(())
+        }
+    }
+
+    impl FrameCapture for WaylandCapture {
+        fn init(&mut self, width: u32, height: u32, format: FrameFormat) -> io::Result<()> {
+            let (output_w, output_h) = self.get_output_dimensions()?;
+            self.width = if width == 0 { output_w } else { width };
+            self.height = if height == 0 { output_h } else { height };
+            self.format = format;
+
+            // Calculate buffer size
+            let size = (self.width * self.height * format.bytes_per_pixel() as u32) as usize;
+            self.buffer.resize(size, 0);
+
+            // Initialize screencopy
+            self.init_screencopy()?;
+
+            log::info!(
+                "Wayland capture initialized: {}x{}, format={:?}",
+                self.width,
+                self.height,
+                self.format
+            );
+
+            Ok(())
+        }
+
+        fn capture_frame(&mut self) -> io::Result<CapturedFrame> {
+            if !self.active {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "Capture not active",
+                ));
+            }
+
+            // TODO: Implement actual frame capture using wlr-screencopy
+            // For now, return the buffer (would be filled by screencopy callback)
+            let data_size = self.buffer.len();
+
+            // Fill with a test pattern to indicate stub implementation
+            let frame_count = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as u8)
+                .unwrap_or(0);
+
+            let bpp = self.format.bytes_per_pixel() as usize;
+            for y in 0..self.height as usize {
+                for x in 0..self.width as usize {
+                    let offset = (y * self.width as usize + x) * bpp;
+                    if offset + bpp <= data_size {
+                        // Purple tint to distinguish from stub
+                        self.buffer[offset] = 128;           // B
+                        self.buffer[offset + 1] = 50;        // G
+                        self.buffer[offset + 2] = ((x + y) as u8).wrapping_add(frame_count); // R
+                        if bpp == 4 {
+                            self.buffer[offset + 3] = 255;   // A
+                        }
+                    }
+                }
+            }
+
+            Ok(CapturedFrame {
+                data: None,
+                data_ptr: self.buffer.as_mut_ptr(),
+                data_size,
+                width: self.width,
+                height: self.height,
+                format: self.format,
+                is_keyframe: true,
+            })
+        }
+
+        fn dimensions(&self) -> (u32, u32) {
+            (self.width, self.height)
+        }
+
+        fn is_active(&self) -> bool {
+            self.active
+        }
+
+        fn start(&mut self) -> io::Result<()> {
+            self.active = true;
+            log::info!("Wayland capture started");
+            Ok(())
+        }
+
+        fn stop(&mut self) -> io::Result<()> {
+            self.active = false;
+            log::info!("Wayland capture stopped");
+            Ok(())
+        }
+    }
+
+    impl Drop for WaylandCapture {
+        fn drop(&mut self) {
+            log::debug!("Wayland capture dropped");
+        }
+    }
+}
+
 // Re-export the appropriate capture backend
-#[cfg(target_os = "linux")]
+// Priority: Wayland > X11 > Stub
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+pub use wayland::WaylandCapture as DefaultCapture;
+
+#[cfg(all(target_os = "linux", not(feature = "wayland")))]
 pub use x11::X11Capture as DefaultCapture;
 
 #[cfg(not(target_os = "linux"))]

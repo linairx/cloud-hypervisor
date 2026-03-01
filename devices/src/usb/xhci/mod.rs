@@ -63,6 +63,8 @@ pub struct XhciController {
     event_rings: Vec<rings::EventRing>,
     /// Guest memory for DMA
     mem: Option<GuestMemoryMmap>,
+    /// USB device address allocator (bit 0 unused, 1-127 valid)
+    address_bitmap: u128,
 }
 
 impl XhciController {
@@ -88,6 +90,7 @@ impl XhciController {
             cmd_ring: rings::CommandRing::new(),
             event_rings,
             mem: None,
+            address_bitmap: 0,
         }
     }
 
@@ -189,6 +192,21 @@ impl XhciController {
             return Err(XhciError::InvalidSlot);
         }
 
+        // Free the device address (get address first to avoid borrow issues)
+        let addr = if let Some(ref slot) = self.slots[slot_id as usize] {
+            if let Ok(s) = slot.lock() {
+                Some(s.address())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(a) = addr {
+            self.free_address(a);
+        }
+
         self.slots[slot_id as usize] = None;
         Ok(())
     }
@@ -201,6 +219,38 @@ impl XhciController {
             }
         }
         Err(XhciError::NoFreeSlots)
+    }
+
+    /// Allocate a USB device address (1-127)
+    /// Returns None if all addresses are in use
+    pub fn allocate_address(&mut self) -> Option<u8> {
+        // Address 0 is reserved for default address
+        for addr in 1..=127 {
+            if self.address_bitmap & (1u128 << addr) == 0 {
+                self.address_bitmap |= 1u128 << addr;
+                return Some(addr);
+            }
+        }
+        None
+    }
+
+    /// Free a USB device address
+    pub fn free_address(&mut self, addr: u8) {
+        if addr > 0 && addr <= 127 {
+            self.address_bitmap &= !(1u128 << addr);
+        }
+    }
+
+    /// Assign address to a slot
+    /// Returns the assigned address, or None if allocation failed
+    pub fn assign_address_to_slot(&mut self, slot_id: u8) -> Option<u8> {
+        let addr = self.allocate_address()?;
+        if let Some(slot) = self.slots.get(slot_id as usize)? {
+            if let Ok(mut s) = slot.lock() {
+                s.set_address(addr);
+            }
+        }
+        Some(addr)
     }
 }
 
@@ -244,5 +294,66 @@ mod tests {
         let caps = ctrl.capability_registers();
 
         assert!(caps.hciversion() == XHCI_VERSION);
+    }
+
+    #[test]
+    fn test_address_allocation() {
+        let mut ctrl = XhciController::new();
+
+        // First allocation should return address 1
+        let addr1 = ctrl.allocate_address();
+        assert_eq!(addr1, Some(1));
+
+        // Second allocation should return address 2
+        let addr2 = ctrl.allocate_address();
+        assert_eq!(addr2, Some(2));
+
+        // Free address 1
+        ctrl.free_address(1);
+
+        // Next allocation should reuse address 1
+        let addr3 = ctrl.allocate_address();
+        assert_eq!(addr3, Some(1));
+
+        // Next allocation should return address 3 (since 2 is still in use)
+        let addr4 = ctrl.allocate_address();
+        assert_eq!(addr4, Some(3));
+    }
+
+    #[test]
+    fn test_address_allocation_all() {
+        let mut ctrl = XhciController::new();
+
+        // Allocate all 127 addresses
+        for expected in 1..=127 {
+            let addr = ctrl.allocate_address();
+            assert_eq!(addr, Some(expected), "Failed at address {}", expected);
+        }
+
+        // Next allocation should fail
+        let addr = ctrl.allocate_address();
+        assert_eq!(addr, None);
+
+        // Free address 50
+        ctrl.free_address(50);
+
+        // Now we should get address 50
+        let addr = ctrl.allocate_address();
+        assert_eq!(addr, Some(50));
+    }
+
+    #[test]
+    fn test_free_address_invalid() {
+        let mut ctrl = XhciController::new();
+
+        // Free address 0 (should be ignored, no panic)
+        ctrl.free_address(0);
+
+        // Free address 128 (should be ignored, no panic)
+        ctrl.free_address(128);
+
+        // First allocation should still be 1
+        let addr = ctrl.allocate_address();
+        assert_eq!(addr, Some(1));
     }
 }

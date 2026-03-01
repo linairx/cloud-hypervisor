@@ -41,14 +41,14 @@ mod batch;
 mod event;
 mod manager;
 
-pub use backend::{InputBackend, InputCapabilities, StealthLevel};
+pub use backend::{InputBackend, InputCapabilities, Ps2Backend, StealthLevel, UsbHidBackend, VirtioInputBackend};
 pub use batch::{
     BatchConfig, BatchProcessor, BatchStats, EventBatch, EventBatcher,
     DEFAULT_BATCH_SIZE, DEFAULT_FLUSH_INTERVAL_US,
 };
 pub use event::{
     InputAction, InputDevice, InputEvent, InputRequest, KeyboardAction, KeyboardEvent,
-    MouseAction, MouseButton, MouseEvent,
+    KeyboardModifiers, MouseAction, MouseButton, MouseButtons, MouseEvent,
 };
 pub use manager::{InputConfig, InputManager};
 
