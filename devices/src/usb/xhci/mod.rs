@@ -151,7 +151,74 @@ impl XhciController {
         }
 
         // Process command TRBs from the command ring
-        // This is a simplified implementation
+        while let Some(trb) = self.cmd_ring.next() {
+            let (code, slot_id) = self.handle_command(&trb);
+
+            // Create completion event
+            let event = self.cmd_ring.create_completion_event(&trb, slot_id, code);
+
+            // Queue event to primary interrupter
+            if let Some(event_ring) = self.event_rings.first_mut() {
+                event_ring.queue(event);
+            }
+        }
+    }
+
+    /// Handle a command TRB
+    fn handle_command(&mut self, trb: &rings::Trb) -> (rings::CompletionCode, u8) {
+        use rings::TrbType;
+
+        match trb.trb_type() {
+            Some(TrbType::EnableSlot) => {
+                // Find free slot
+                match self.find_free_slot() {
+                    Ok(slot_id) => (rings::CompletionCode::Success, slot_id),
+                    Err(_) => (rings::CompletionCode::NoSlotsAvailable, 0),
+                }
+            }
+            Some(TrbType::DisableSlot) => {
+                let slot_id = (trb.control >> 24) as u8;
+                if (slot_id as usize) < self.slots.len() {
+                    self.slots[slot_id as usize] = None;
+                    (rings::CompletionCode::Success, slot_id)
+                } else {
+                    (rings::CompletionCode::SlotNotEnabled, 0)
+                }
+            }
+            Some(TrbType::AddressDevice) => {
+                let slot_id = (trb.control >> 24) as u8;
+                if let Some(ref slot) = self.slots.get(slot_id as usize).and_then(|s| s.clone()) {
+                    if let Ok(mut s) = slot.lock() {
+                        let addr = self.allocate_address();
+                        let (code, _) = s.handle_command(trb, addr);
+                        (code, slot_id)
+                    } else {
+                        (rings::CompletionCode::SlotNotEnabled, slot_id)
+                    }
+                } else {
+                    (rings::CompletionCode::SlotNotEnabled, 0)
+                }
+            }
+            Some(TrbType::ConfigureEndpoint) => {
+                let slot_id = (trb.control >> 24) as u8;
+                if let Some(ref slot) = self.slots.get(slot_id as usize).and_then(|s| s.clone()) {
+                    if let Ok(mut s) = slot.lock() {
+                        let (code, _) = s.handle_command(trb, None);
+                        (code, slot_id)
+                    } else {
+                        (rings::CompletionCode::SlotNotEnabled, slot_id)
+                    }
+                } else {
+                    (rings::CompletionCode::SlotNotEnabled, 0)
+                }
+            }
+            Some(TrbType::Noop) => {
+                (rings::CompletionCode::Success, 0)
+            }
+            _ => {
+                (rings::CompletionCode::TrbError, 0)
+            }
+        }
     }
 
     /// Get controller state
@@ -219,6 +286,20 @@ impl XhciController {
             }
         }
         Err(XhciError::NoFreeSlots)
+    }
+
+    /// Process transfer ring for a slot endpoint
+    pub fn process_transfer(&mut self, slot_id: u8, ep_id: u8) {
+        if slot_id as usize >= self.slots.len() || ep_id > 31 {
+            return;
+        }
+
+        if let Some(ref slot) = self.slots[slot_id as usize] {
+            if let Ok(mut slot_guard) = slot.lock() {
+                // Process transfers from the endpoint's transfer ring
+                slot_guard.process_transfer(ep_id, &self.mem);
+            }
+        }
     }
 
     /// Allocate a USB device address (1-127)

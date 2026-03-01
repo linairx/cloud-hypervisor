@@ -9,6 +9,76 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use super::rings::{Trb, TransferRing, CompletionCode, TrbType};
+use vm_memory::{GuestMemoryMmap, Bytes, GuestAddress};
+
+// ============================================================================
+// Helper Types and Functions
+// ============================================================================
+
+/// TRB size in bytes
+const TRB_SIZE: usize = 16;
+
+/// Endpoint states
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointState {
+    Disabled = 0,
+    Running = 1,
+    Halted = 2,
+    Stopped = 3,
+    Error = 4,
+}
+
+impl From<u8> for EndpointState {
+    fn from(value: u8) -> Self {
+        match value & 0x07 {
+            0 => EndpointState::Disabled,
+            1 => EndpointState::Running,
+            2 => EndpointState::Halted,
+            3 => EndpointState::Stopped,
+            _ => EndpointState::Error,
+        }
+    }
+}
+
+/// Read a TRB from guest memory
+fn read_trb_from_memory(mem: &GuestMemoryMmap, addr: u64) -> Option<Trb> {
+    let mut buf = [0u8; TRB_SIZE];
+    mem.read(&mut buf, GuestAddress(addr)).ok()?;
+    Some(Trb::from_bytes(&buf))
+}
+
+/// Read data from guest memory
+fn read_mem(mem: &GuestMemoryMmap, addr: u64, len: usize) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; len];
+    mem.read(&mut buf, GuestAddress(addr)).ok()?;
+    Some(buf)
+}
+
+/// Write data to guest memory
+fn write_mem(mem: &GuestMemoryMmap, addr: u64, data: &[u8]) -> bool {
+    mem.write(data, GuestAddress(addr)).is_ok()
+}
+
+/// Extended TRB structure with helper methods
+trait TrbExt {
+    fn cycle_bit(&self) -> bool;
+    fn transfer_length(&self) -> u32;
+    fn parameter(&self) -> u64;
+}
+
+impl TrbExt for Trb {
+    fn cycle_bit(&self) -> bool {
+        self.control & 1 != 0
+    }
+
+    fn transfer_length(&self) -> u32 {
+        self.status & 0x1FFFF
+    }
+
+    fn parameter(&self) -> u64 {
+        self.parameter
+    }
+}
 
 // ============================================================================
 // USB Device Trait
@@ -224,17 +294,6 @@ pub struct EndpointContext {
     pub ce: u8,
 }
 
-/// Endpoint states
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EndpointState {
-    Disabled = 0,
-    Running = 1,
-    Halted = 2,
-    Stopped = 3,
-    Error = 4,
-}
-
 /// Endpoint types
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,6 +428,127 @@ impl XhciDeviceSlot {
                 // Handle transfer
             }
         }
+    }
+
+    /// Process transfer for an endpoint
+    ///
+    /// This method reads TRBs from the transfer ring and processes them.
+    /// For IN endpoints, it queues data from the device.
+    /// For OUT endpoints, it sends data to the device.
+    pub fn process_transfer(&mut self, ep_id: u8, mem: &Option<GuestMemoryMmap>) -> Option<(CompletionCode, u32)> {
+        let ep_idx = ep_id as usize;
+        let ring = self.transfer_rings.get(ep_idx)?.as_ref()?;
+        let ep_ctx = self.context.endpoint(ep_idx)?;
+
+        // Check if endpoint is running
+        if ep_ctx.state() != EndpointState::Running {
+            return None;
+        }
+
+        // Get the dequeue pointer
+        let dequeue_ptr = ep_ctx.tr_dequeue_ptr();
+        let dcs = ep_ctx.dcs();
+
+        // Read TRB from guest memory
+        let mem = mem.as_ref()?;
+        let trb = read_trb_from_memory(mem, dequeue_ptr)?;
+
+        // Check cycle bit
+        if trb.cycle_bit() != dcs {
+            // Ring is empty
+            return None;
+        }
+
+        // Process based on TRB type
+        let result = match trb.trb_type() {
+            Some(TrbType::Normal) => self.handle_normal_transfer(&trb, ep_id, mem),
+            Some(TrbType::SetupStage) => self.handle_setup_stage(&trb),
+            Some(TrbType::DataStage) => self.handle_data_stage(&trb, ep_id, mem),
+            Some(TrbType::StatusStage) => self.handle_status_stage(&trb),
+            _ => (CompletionCode::TrbError, 0),
+        };
+
+        // Update dequeue pointer (simplified - should handle link TRBs)
+        let new_dequeue = dequeue_ptr + 16; // TRB_SIZE
+        self.context.endpoint_mut(ep_idx)?.set_tr_dequeue_ptr(new_dequeue);
+
+        Some(result)
+    }
+
+    /// Handle normal transfer TRB
+    fn handle_normal_transfer(&mut self, trb: &Trb, ep_id: u8, mem: &GuestMemoryMmap) -> (CompletionCode, u32) {
+        let data_ptr = trb.parameter;
+        let length = trb.transfer_length();
+
+        if let Some(ref device) = self.device {
+            if let Ok(mut dev) = device.lock() {
+                // Determine direction from endpoint number
+                let is_in = ep_id >= 16; // EP 16-31 are IN endpoints
+
+                if is_in {
+                    // IN transfer - get data from device
+                    let ep = 0x80 | (ep_id - 16);
+                    match dev.handle_transfer(ep, &[]) {
+                        Ok(data) => {
+                            // Write data to guest memory
+                            let write_len = std::cmp::min(data.len(), length as usize);
+                            if write_mem(mem, data_ptr, &data[..write_len]) {
+                                (CompletionCode::Success, write_len as u32)
+                            } else {
+                                (CompletionCode::Error, 0)
+                            }
+                        }
+                        Err(_) => (CompletionCode::Stalled, 0),
+                    }
+                } else {
+                    // OUT transfer - read data from guest memory
+                    let read_len = length as usize;
+                    if let Some(data) = read_mem(mem, data_ptr, read_len) {
+                        match dev.handle_transfer(ep_id, &data) {
+                            Ok(_) => (CompletionCode::Success, length),
+                            Err(_) => (CompletionCode::Stalled, 0),
+                        }
+                    } else {
+                        (CompletionCode::Error, 0)
+                    }
+                }
+            } else {
+                (CompletionCode::Error, 0)
+            }
+        } else {
+            (CompletionCode::SlotNotEnabled, 0)
+        }
+    }
+
+    /// Handle setup stage TRB (for control endpoints)
+    fn handle_setup_stage(&mut self, trb: &Trb) -> (CompletionCode, u32) {
+        // Setup packet is in the parameter field (8 bytes)
+        let setup_packet = trb.parameter.to_le_bytes();
+
+        if let Some(ref device) = self.device {
+            if let Ok(mut dev) = device.lock() {
+                match dev.handle_control(&setup_packet) {
+                    Ok(_) => (CompletionCode::Success, 0),
+                    Err(_) => (CompletionCode::Stalled, 0),
+                }
+            } else {
+                (CompletionCode::Error, 0)
+            }
+        } else {
+            (CompletionCode::SlotNotEnabled, 0)
+        }
+    }
+
+    /// Handle data stage TRB
+    fn handle_data_stage(&mut self, trb: &Trb, ep_id: u8, mem: &GuestMemoryMmap) -> (CompletionCode, u32) {
+        // Similar to normal transfer but for control endpoint data phase
+        self.handle_normal_transfer(trb, ep_id, mem)
+    }
+
+    /// Handle status stage TRB
+    fn handle_status_stage(&mut self, _trb: &Trb) -> (CompletionCode, u32) {
+        // Status stage is zero-length
+        (CompletionCode::Success, 0)
     }
 
     /// Initialize endpoint ring
