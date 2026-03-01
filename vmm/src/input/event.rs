@@ -10,20 +10,56 @@
 //! - Mouse events (move/buttons/scroll)
 //! - Touch events (planned)
 //! - Gamepad events (planned)
+//!
+//! # Event Structure
+//!
+//! All events are serializable and can be sent over the HTTP API or
+//! stored in batch queues. The event types are designed to be simple
+//! and efficient for high-frequency injection.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use vmm::input::event::{KeyboardEvent, KeyboardAction, MouseEvent, MouseAction};
+//!
+//! // Create a keyboard event
+//! let key_event = KeyboardEvent {
+//!     action: KeyboardAction::Type,
+//!     code: 0x1E, // A key
+//!     modifiers: Default::default(),
+//! };
+//!
+//! // Create a mouse move event
+//! let mouse_event = MouseEvent {
+//!     action: MouseAction::Move,
+//!     x: 100,
+//!     y: 50,
+//!     ..Default::default()
+//! };
+//! ```
 
 use serde::{Deserialize, Serialize};
 
-/// Input device type
+/// Input device type.
+///
+/// Represents the category of input device that generated an event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputDevice {
+    /// Keyboard device
     Keyboard,
+    /// Mouse device
     Mouse,
+    /// Touch device (planned)
     Touch,
+    /// Gamepad device (planned)
     Gamepad,
 }
 
-/// Input action type
+/// Input action type.
+///
+/// Represents the type of action being performed on an input device.
+/// Not all actions are valid for all device types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputAction {
@@ -45,41 +81,131 @@ pub enum InputAction {
 // Keyboard Events
 // ============================================================================
 
-/// Keyboard event
+/// Keyboard event for input injection.
+///
+/// Represents a single keyboard action with optional modifiers.
+///
+/// # Fields
+///
+/// * `action` - The type of keyboard action (press, release, or type)
+/// * `code` - PS/2 Set 1 scancode
+/// * `modifiers` - Active keyboard modifiers (Ctrl, Shift, etc.)
+///
+/// # Scancodes
+///
+/// The `code` field uses PS/2 Set 1 scancodes. Common codes are available
+/// in the [`keys`] module.
+    ///
+    /// [`keys`]: #reexports
+///
+/// # Example
+///
+/// ```ignore
+/// use vmm::input::event::{KeyboardEvent, KeyboardAction, KeyboardModifiers};
+///
+/// // Simple key press
+/// let press_a = KeyboardEvent {
+///     action: KeyboardAction::Press,
+///     code: 0x1E, // A key
+///     modifiers: Default::default(),
+/// };
+///
+/// // Ctrl+C shortcut
+/// let ctrl_c = KeyboardEvent {
+///     action: KeyboardAction::Type,
+///     code: 0x2E, // C key
+///     modifiers: KeyboardModifiers { ctrl: true, ..Default::default() },
+/// };
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KeyboardEvent {
-    /// Action to perform
+    /// Action to perform.
+    ///
+    /// - `Press`: Key down event
+    /// - `Release`: Key up event
+    /// - `Type`: Press followed by release (convenience)
     pub action: KeyboardAction,
-    /// Key code (scancode)
+    /// Key code (PS/2 Set 1 scancode).
+    ///
+    /// See the [`keys`] module for common codes.
+    ///
+    /// [`keys`]: #reexports
     pub code: u16,
-    /// Modifier keys (optional, for complex shortcuts)
+    /// Modifier keys (optional, for complex shortcuts).
+    ///
+    /// Note: Modifiers should typically be sent as separate key events.
+    /// This field is for informational purposes in some backends.
     #[serde(default)]
     pub modifiers: KeyboardModifiers,
 }
 
-/// Keyboard action
+/// Keyboard action type.
+///
+/// Defines the type of keyboard action to perform.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KeyboardAction {
+    /// Key press (key down)
     Press,
+    /// Key release (key up)
     Release,
+    /// Key press and release (convenience for typing)
     Type,
 }
 
-/// Keyboard modifier states
+/// Keyboard modifier states.
+///
+/// Represents the state of keyboard modifier keys.
+/// This is used for informational purposes and shortcut combinations.
+///
+/// # Example
+///
+/// ```ignore
+/// use vmm::input::event::KeyboardModifiers;
+///
+/// let modifiers = KeyboardModifiers {
+///     ctrl: true,
+///     shift: true,
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct KeyboardModifiers {
+    /// Control key (left or right)
     #[serde(default)]
     pub ctrl: bool,
+    /// Alt key (left or right)
     #[serde(default)]
     pub alt: bool,
+    /// Shift key (left or right)
     #[serde(default)]
     pub shift: bool,
+    /// Meta/Windows/Super key
     #[serde(default)]
-    pub meta: bool, // Windows/Super key
+    pub meta: bool,
 }
 
-/// Standard key codes (PC scancodes Set 1)
+/// Standard key codes (PC scancodes Set 1).
+///
+/// This module provides constants for common PS/2 Set 1 scancodes.
+/// Use these constants instead of raw hex values for readability.
+///
+/// # Example
+///
+/// ```ignore
+/// use vmm::input::event::{KeyboardEvent, KeyboardAction, keys};
+///
+/// let event = KeyboardEvent {
+///     action: KeyboardAction::Type,
+///     code: keys::A,
+///     modifiers: Default::default(),
+/// };
+/// ```
+///
+/// # Extended Scancodes
+///
+/// Some keys (navigation keys, numpad, right modifiers) use extended
+/// scancodes with an `0xE0` prefix. These are represented as `0xE0XX`.
 pub mod keys {
     // Function keys
     pub const ESCAPE: u16 = 0x01;
@@ -200,35 +326,89 @@ pub mod keys {
 // Mouse Events
 // ============================================================================
 
-/// Mouse event
+/// Mouse event for input injection.
+///
+/// Represents a single mouse action including movement, button clicks,
+/// and scroll wheel.
+///
+/// # Fields
+///
+/// * `action` - The type of mouse action
+/// * `x` - X coordinate (absolute) or delta (relative)
+/// * `y` - Y coordinate (absolute) or delta (relative)
+/// * `z` - Scroll wheel delta
+/// * `button` - Button for button actions
+/// * `buttons` - All button states for drag operations
+///
+/// # Example
+///
+/// ```ignore
+/// use vmm::input::event::{MouseEvent, MouseAction, MouseButton};
+///
+/// // Relative mouse movement
+/// let move_event = MouseEvent {
+///     action: MouseAction::Move,
+///     x: 100,
+///     y: 50,
+///     ..Default::default()
+/// };
+///
+/// // Left click
+/// let click_event = MouseEvent {
+///     action: MouseAction::Click,
+///     button: Some(MouseButton::Left),
+///     ..Default::default()
+/// };
+///
+/// // Scroll up
+/// let scroll_event = MouseEvent {
+///     action: MouseAction::Scroll,
+///     z: 1,
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MouseEvent {
-    /// Action to perform
+    /// Action to perform.
     pub action: MouseAction,
-    /// X coordinate or delta
+    /// X coordinate or delta.
+    ///
+    /// For relative movement: delta in pixels.
+    /// For absolute positioning: coordinate in screen space.
     #[serde(default)]
     pub x: i32,
-    /// Y coordinate or delta
+    /// Y coordinate or delta.
+    ///
+    /// For relative movement: delta in pixels.
+    /// For absolute positioning: coordinate in screen space.
     #[serde(default)]
     pub y: i32,
-    /// Z coordinate (scroll wheel) or delta
+    /// Z coordinate (scroll wheel) or delta.
+    ///
+    /// Positive values scroll up, negative scroll down.
     #[serde(default)]
     pub z: i32,
-    /// Button (for button actions)
+    /// Button (for button actions).
+    ///
+    /// Required for ButtonPress, ButtonRelease, and Click actions.
     #[serde(default)]
     pub button: Option<MouseButton>,
-    /// All button states (for move with buttons)
+    /// All button states (for move with buttons).
+    ///
+    /// Used to indicate which buttons are held during drag operations.
     #[serde(default)]
     pub buttons: MouseButtons,
 }
 
-/// Mouse action
+/// Mouse action type.
+///
+/// Defines the type of mouse action to perform.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseAction {
-    /// Relative movement
+    /// Relative movement (delta in pixels)
     Move,
-    /// Absolute position (0-65535 range)
+    /// Absolute position (screen coordinates)
     MoveAbsolute,
     /// Button press
     ButtonPress,
@@ -240,39 +420,73 @@ pub enum MouseAction {
     Scroll,
 }
 
-/// Mouse button identifier
+/// Mouse button identifier.
+///
+/// Represents a single mouse button for button actions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseButton {
+    /// Primary (left) button
     Left,
+    /// Secondary (right) button
     Right,
+    /// Middle (scroll wheel click) button
     Middle,
-    Side,   // Side button (typically back)
-    Extra,  // Extra button (typically forward)
+    /// Side button (typically back)
+    Side,
+    /// Extra button (typically forward)
+    Extra,
 }
 
-/// Mouse button states
+/// Mouse button states.
+///
+/// Represents the state of all mouse buttons simultaneously.
+/// Used for drag operations where multiple buttons may be held.
+///
+/// # Example
+///
+/// ```ignore
+/// use vmm::input::event::{MouseEvent, MouseAction, MouseButtons};
+///
+/// // Drag with left button held
+/// let drag_event = MouseEvent {
+///     action: MouseAction::Move,
+///     x: 10,
+///     y: 5,
+///     buttons: MouseButtons { left: true, ..Default::default() },
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct MouseButtons {
+    /// Left button state
     #[serde(default)]
     pub left: bool,
+    /// Right button state
     #[serde(default)]
     pub right: bool,
+    /// Middle button state
     #[serde(default)]
     pub middle: bool,
+    /// Side button state
     #[serde(default)]
     pub side: bool,
+    /// Extra button state
     #[serde(default)]
     pub extra: bool,
 }
 
 impl MouseButtons {
-    /// Check if any button is pressed
+    /// Check if any button is pressed.
+    ///
+    /// Returns `true` if any button is currently held down.
     pub fn any(&self) -> bool {
         self.left || self.right || self.middle || self.side || self.extra
     }
 
-    /// Get button count
+    /// Get count of pressed buttons.
+    ///
+    /// Returns the number of buttons currently held down.
     pub fn count(&self) -> u8 {
         let mut count = 0;
         if self.left {
@@ -298,16 +512,46 @@ impl MouseButtons {
 // Generic Input Event
 // ============================================================================
 
-/// Generic input event (union of all event types)
+/// Generic input event (union of all event types).
+///
+/// This enum wraps all possible input event types for unified handling.
+/// It is tagged with the device type for JSON serialization.
+///
+/// # Example
+///
+/// ```ignore
+/// use vmm::input::event::{InputEvent, KeyboardAction, MouseButton};
+///
+/// // Create keyboard event
+/// let key_event = InputEvent::keyboard(KeyboardAction::Type, 0x1E);
+///
+/// // Create mouse move event
+/// let move_event = InputEvent::mouse_move(100, 50);
+///
+/// // Create mouse button event
+/// let click_event = InputEvent::mouse_button(MouseButton::Left, true);
+///
+/// // Create scroll event
+/// let scroll_event = InputEvent::mouse_scroll(1);
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "device", rename_all = "lowercase")]
 pub enum InputEvent {
+    /// Keyboard event
     Keyboard(KeyboardEvent),
+    /// Mouse event
     Mouse(MouseEvent),
 }
 
 impl InputEvent {
-    /// Create a keyboard event
+    /// Create a keyboard event.
+    ///
+    /// Convenience constructor for keyboard events with no modifiers.
+    ///
+    /// # Arguments
+    ///
+    /// * `action` - Keyboard action (Press, Release, Type)
+    /// * `code` - PS/2 Set 1 scancode
     pub fn keyboard(action: KeyboardAction, code: u16) -> Self {
         InputEvent::Keyboard(KeyboardEvent {
             action,
@@ -316,7 +560,14 @@ impl InputEvent {
         })
     }
 
-    /// Create a mouse move event
+    /// Create a mouse move event.
+    ///
+    /// Convenience constructor for relative mouse movement.
+    ///
+    /// # Arguments
+    ///
+    /// * `dx` - X delta in pixels
+    /// * `dy` - Y delta in pixels
     pub fn mouse_move(dx: i32, dy: i32) -> Self {
         InputEvent::Mouse(MouseEvent {
             action: MouseAction::Move,
@@ -328,7 +579,14 @@ impl InputEvent {
         })
     }
 
-    /// Create a mouse button event
+    /// Create a mouse button event.
+    ///
+    /// Convenience constructor for mouse button press/release.
+    ///
+    /// # Arguments
+    ///
+    /// * `button` - Which button to press/release
+    /// * `pressed` - `true` for press, `false` for release
     pub fn mouse_button(button: MouseButton, pressed: bool) -> Self {
         InputEvent::Mouse(MouseEvent {
             action: if pressed {
@@ -344,7 +602,13 @@ impl InputEvent {
         })
     }
 
-    /// Create a mouse scroll event
+    /// Create a mouse scroll event.
+    ///
+    /// Convenience constructor for scroll wheel.
+    ///
+    /// # Arguments
+    ///
+    /// * `delta` - Scroll amount (positive=up, negative=down)
     pub fn mouse_scroll(delta: i32) -> Self {
         InputEvent::Mouse(MouseEvent {
             action: MouseAction::Scroll,
@@ -361,27 +625,55 @@ impl InputEvent {
 // Batch Input Request
 // ============================================================================
 
-/// Batch input injection request
+/// Batch input injection request.
+///
+/// Represents a batch of keyboard and mouse events to be injected
+/// together. This is used for efficient bulk injection over the API.
+///
+/// # Example
+///
+/// ```ignore
+/// use vmm::input::event::{InputRequest, KeyboardEvent, KeyboardAction};
+///
+/// let request = InputRequest {
+///     backend: Some("ps2".to_string()),
+///     keyboard: vec![
+///         KeyboardEvent { action: KeyboardAction::Press, code: 0x1D, ..Default::default() },
+///         KeyboardEvent { action: KeyboardAction::Press, code: 0x2E, ..Default::default() },
+///         KeyboardEvent { action: KeyboardAction::Release, code: 0x2E, ..Default::default() },
+///         KeyboardEvent { action: KeyboardAction::Release, code: 0x1D, ..Default::default() },
+///     ],
+///     mouse: vec![],
+/// };
+///
+/// assert_eq!(request.event_count(), 4);
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InputRequest {
-    /// Optional backend override
+    /// Optional backend override.
+    ///
+    /// If specified, this backend will be used instead of the default.
     #[serde(default)]
     pub backend: Option<String>,
-    /// Keyboard events to inject
+    /// Keyboard events to inject.
     #[serde(default)]
     pub keyboard: Vec<KeyboardEvent>,
-    /// Mouse events to inject
+    /// Mouse events to inject.
     #[serde(default)]
     pub mouse: Vec<MouseEvent>,
 }
 
 impl InputRequest {
-    /// Check if request is empty
+    /// Check if request is empty.
+    ///
+    /// Returns `true` if there are no keyboard or mouse events.
     pub fn is_empty(&self) -> bool {
         self.keyboard.is_empty() && self.mouse.is_empty()
     }
 
-    /// Count total events
+    /// Count total events.
+    ///
+    /// Returns the sum of keyboard and mouse event counts.
     pub fn event_count(&self) -> usize {
         self.keyboard.len() + self.mouse.len()
     }

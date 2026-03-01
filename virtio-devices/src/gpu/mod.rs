@@ -43,6 +43,9 @@ const CURSOR_QUEUE: usize = 1;
 /// EDID feature bit
 pub const VIRTIO_GPU_F_EDID: u64 = 1;
 
+/// VIRGL 3D feature bit
+pub const VIRTIO_GPU_F_VIRGL: u64 = 2;
+
 // VirtIO GPU commands
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
@@ -52,6 +55,16 @@ const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
+
+// VIRGL 3D commands
+const VIRTIO_GPU_CMD_CTX_CREATE: u32 = 0x0200;
+const VIRTIO_GPU_CMD_CTX_DESTROY: u32 = 0x0201;
+const VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE: u32 = 0x0202;
+const VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE: u32 = 0x0203;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_3D: u32 = 0x0204;
+const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D: u32 = 0x0205;
+const VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D: u32 = 0x0206;
+const VIRTIO_GPU_CMD_SUBMIT_3D: u32 = 0x0207;
 
 // VirtIO GPU responses
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
@@ -244,6 +257,115 @@ struct MemEntry {
 // SAFETY: MemEntry is POD
 unsafe impl ByteValued for MemEntry {}
 
+/// Box for 3D transfers
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+struct Box3D {
+    x: u32,
+    y: u32,
+    z: u32,
+    w: u32,
+    h: u32,
+    d: u32,
+}
+
+// SAFETY: Box3D is POD and has no implicit padding
+unsafe impl ByteValued for Box3D {}
+
+/// Context create command
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CtxCreate {
+    header: CtrlHeader,
+    nctx: u32,  // Context name length
+    context_name: [u8; 64],
+}
+
+// SAFETY: CtxCreate is POD
+unsafe impl ByteValued for CtxCreate {}
+
+/// Context destroy command
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CtxDestroy {
+    header: CtrlHeader,
+    padding: u32,
+}
+
+// SAFETY: CtxDestroy is POD
+unsafe impl ByteValued for CtxDestroy {}
+
+/// Context attach resource command
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CtxAttachResource {
+    header: CtrlHeader,
+    resource_id: u32,
+    padding: u32,
+}
+
+// SAFETY: CtxAttachResource is POD
+unsafe impl ByteValued for CtxAttachResource {}
+
+/// Context detach resource command
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CtxDetachResource {
+    header: CtrlHeader,
+    resource_id: u32,
+    padding: u32,
+}
+
+// SAFETY: CtxDetachResource is POD
+unsafe impl ByteValued for CtxDetachResource {}
+
+/// Resource create 3D command
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct ResourceCreate3D {
+    header: CtrlHeader,
+    resource_id: u32,
+    format: u32,
+    width: u32,
+    height: u32,
+    depth: u32,
+    target: u32,
+    bind: u32,
+    nr_samples: u32,
+    flags: u32,
+    padding: u32,
+}
+
+// SAFETY: ResourceCreate3D is POD
+unsafe impl ByteValued for ResourceCreate3D {}
+
+/// Transfer 3D command
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct Transfer3D {
+    header: CtrlHeader,
+    resource_id: u32,
+    level: u32,
+    stride: u32,
+    layer_stride: u32,
+    box_: Box3D,
+    offset: u64,
+}
+
+// SAFETY: Transfer3D is POD
+unsafe impl ByteValued for Transfer3D {}
+
+/// Submit 3D command header
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct Submit3D {
+    header: CtrlHeader,
+    size: u32,  // Size of command buffer in bytes
+}
+
+// SAFETY: Submit3D is POD
+unsafe impl ByteValued for Submit3D {}
+
 /// 2D resource
 #[derive(Debug, Clone)]
 struct Resource2D {
@@ -277,6 +399,81 @@ impl Resource2D {
             backing: Vec::new(),
             data: vec![0u8; size],
         })
+    }
+}
+
+/// VIRGL 3D context
+#[derive(Debug, Clone)]
+struct VirglContext {
+    /// Context ID
+    id: u32,
+    /// Context name
+    name: String,
+    /// Attached resources
+    resources: Vec<u32>,
+}
+
+impl VirglContext {
+    fn new(id: u32, name: String) -> Self {
+        Self {
+            id,
+            name,
+            resources: Vec::new(),
+        }
+    }
+}
+
+/// 3D resource (VIRGL)
+#[derive(Debug, Clone)]
+struct Resource3D {
+    /// Resource ID
+    id: u32,
+    /// Width
+    width: u32,
+    /// Height
+    height: u32,
+    /// Depth
+    depth: u32,
+    /// Format
+    format: u32,
+    /// Target (TEXTURE_2D, etc.)
+    target: u32,
+    /// Bind flags
+    bind: u32,
+    /// Number of samples
+    nr_samples: u32,
+    /// Flags
+    flags: u32,
+    /// Data buffer
+    data: Vec<u8>,
+}
+
+impl Resource3D {
+    fn new(
+        id: u32,
+        width: u32,
+        height: u32,
+        depth: u32,
+        format: u32,
+        target: u32,
+        bind: u32,
+        nr_samples: u32,
+        flags: u32,
+    ) -> Self {
+        // Simplified size calculation - assumes 4 bytes per pixel
+        let size = (width as usize) * (height as usize) * (depth as usize) * 4;
+        Self {
+            id,
+            width,
+            height,
+            depth,
+            format,
+            target,
+            bind,
+            nr_samples,
+            flags,
+            data: vec![0u8; size],
+        }
     }
 }
 
@@ -332,6 +529,12 @@ pub struct Gpu {
     display_height: u32,
     /// 2D resources
     resources: Arc<Mutex<HashMap<u32, Resource2D>>>,
+    /// VIRGL contexts
+    virgl_contexts: Arc<Mutex<HashMap<u32, VirglContext>>>,
+    /// 3D resources
+    resources_3d: Arc<Mutex<HashMap<u32, Resource3D>>>,
+    /// VIRGL feature enabled
+    virgl_enabled: bool,
     /// Seccomp action
     seccomp_action: SeccompAction,
     /// Exit event
@@ -348,11 +551,27 @@ impl Gpu {
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
     ) -> io::Result<Self> {
+        Self::new_with_virgl(display_width, display_height, true, seccomp_action, exit_evt)
+    }
+
+    /// Create a new VirtIO GPU device with VIRGL option
+    pub fn new_with_virgl(
+        display_width: u32,
+        display_height: u32,
+        virgl_enabled: bool,
+        seccomp_action: SeccompAction,
+        exit_evt: EventFd,
+    ) -> io::Result<Self> {
+        let mut avail_features = 1u64 << VIRTIO_GPU_F_EDID;
+        if virgl_enabled {
+            avail_features |= 1u64 << VIRTIO_GPU_F_VIRGL;
+        }
+
         Ok(Self {
             common: VirtioCommon {
                 device_type: VirtioDeviceType::Gpu as u32,
                 queue_sizes: QUEUE_SIZES.to_vec(),
-                avail_features: 1u64 << VIRTIO_GPU_F_EDID,
+                avail_features,
                 paused_sync: Some(Arc::new(Barrier::new(2))),
                 min_queues: NUM_QUEUES as u16,
                 ..Default::default()
@@ -361,6 +580,9 @@ impl Gpu {
             display_width,
             display_height,
             resources: Arc::new(Mutex::new(HashMap::new())),
+            virgl_contexts: Arc::new(Mutex::new(HashMap::new())),
+            resources_3d: Arc::new(Mutex::new(HashMap::new())),
+            virgl_enabled,
             seccomp_action,
             exit_evt,
             interrupt_cb: None,
@@ -370,6 +592,11 @@ impl Gpu {
     /// Get display dimensions
     pub fn display_dimensions(&self) -> (u32, u32) {
         (self.display_width, self.display_height)
+    }
+
+    /// Check if VIRGL is enabled
+    pub fn is_virgl_enabled(&self) -> bool {
+        self.virgl_enabled
     }
 }
 
@@ -393,8 +620,11 @@ struct GpuEpollHandler {
     kill_evt: EventFd,
     pause_evt: EventFd,
     resources: Arc<Mutex<HashMap<u32, Resource2D>>>,
+    virgl_contexts: Arc<Mutex<HashMap<u32, VirglContext>>>,
+    resources_3d: Arc<Mutex<HashMap<u32, Resource3D>>>,
     display_width: u32,
     display_height: u32,
+    virgl_enabled: bool,
 }
 
 impl GpuEpollHandler {
@@ -546,6 +776,214 @@ impl GpuEpollHandler {
         Self::create_response_header(VIRTIO_GPU_RESP_OK_NODATA)
     }
 
+    // ============== VIRGL 3D Command Handlers ==============
+
+    /// Handle VIRGL context create
+    fn handle_ctx_create(&mut self, cmd: &CtxCreate) -> CtrlHeader {
+        if !self.virgl_enabled {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_UNSPEC);
+        }
+
+        // Extract context name from the fixed-size array
+        let name_len = std::cmp::min(cmd.nctx as usize, cmd.context_name.len());
+        let name = String::from_utf8_lossy(&cmd.context_name[..name_len]).into_owned();
+
+        let ctx_id = cmd.header.ctx_id;
+        let context = VirglContext::new(ctx_id, name);
+
+        let mut contexts = self.virgl_contexts.lock().expect("Failed to lock virgl_contexts mutex: another thread panicked while holding the lock");
+        contexts.insert(ctx_id, context);
+
+        Self::create_response_header(VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// Handle VIRGL context destroy
+    fn handle_ctx_destroy(&mut self, cmd: &CtxDestroy) -> CtrlHeader {
+        if !self.virgl_enabled {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_UNSPEC);
+        }
+
+        let ctx_id = cmd.header.ctx_id;
+        let mut contexts = self.virgl_contexts.lock().expect("Failed to lock virgl_contexts mutex: another thread panicked while holding the lock");
+        contexts.remove(&ctx_id);
+
+        Self::create_response_header(VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// Handle VIRGL context attach resource
+    fn handle_ctx_attach_resource(&mut self, cmd: &CtxAttachResource) -> CtrlHeader {
+        if !self.virgl_enabled {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_UNSPEC);
+        }
+
+        if cmd.resource_id == 0 {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID);
+        }
+
+        let ctx_id = cmd.header.ctx_id;
+        let mut contexts = self.virgl_contexts.lock().expect("Failed to lock virgl_contexts mutex: another thread panicked while holding the lock");
+
+        if let Some(context) = contexts.get_mut(&ctx_id) {
+            if !context.resources.contains(&cmd.resource_id) {
+                context.resources.push(cmd.resource_id);
+            }
+            Self::create_response_header(VIRTIO_GPU_RESP_OK_NODATA)
+        } else {
+            Self::create_response_header(VIRTIO_GPU_RESP_ERR_UNSPEC)
+        }
+    }
+
+    /// Handle VIRGL context detach resource
+    fn handle_ctx_detach_resource(&mut self, cmd: &CtxDetachResource) -> CtrlHeader {
+        if !self.virgl_enabled {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_UNSPEC);
+        }
+
+        let ctx_id = cmd.header.ctx_id;
+        let mut contexts = self.virgl_contexts.lock().expect("Failed to lock virgl_contexts mutex: another thread panicked while holding the lock");
+
+        if let Some(context) = contexts.get_mut(&ctx_id) {
+            context.resources.retain(|&id| id != cmd.resource_id);
+            Self::create_response_header(VIRTIO_GPU_RESP_OK_NODATA)
+        } else {
+            Self::create_response_header(VIRTIO_GPU_RESP_ERR_UNSPEC)
+        }
+    }
+
+    /// Handle resource create 3D
+    fn handle_resource_create_3d(&mut self, cmd: &ResourceCreate3D) -> CtrlHeader {
+        if !self.virgl_enabled {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_UNSPEC);
+        }
+
+        if cmd.resource_id == 0 {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID);
+        }
+
+        let resource = Resource3D::new(
+            cmd.resource_id,
+            cmd.width,
+            cmd.height,
+            cmd.depth,
+            cmd.format,
+            cmd.target,
+            cmd.bind,
+            cmd.nr_samples,
+            cmd.flags,
+        );
+
+        let mut resources_3d = self.resources_3d.lock().expect("Failed to lock resources_3d mutex: another thread panicked while holding the lock");
+        resources_3d.insert(cmd.resource_id, resource);
+
+        Self::create_response_header(VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// Handle transfer to host 3D
+    fn handle_transfer_to_host_3d<M: GuestMemory>(
+        &mut self,
+        mem: &M,
+        cmd: &Transfer3D,
+    ) -> CtrlHeader {
+        if !self.virgl_enabled {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_UNSPEC);
+        }
+
+        if cmd.resource_id == 0 {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID);
+        }
+
+        let mut resources_3d = self.resources_3d.lock().expect("Failed to lock resources_3d mutex: another thread panicked while holding the lock");
+
+        if let Some(resource) = resources_3d.get_mut(&cmd.resource_id) {
+            // Calculate destination offset based on box coordinates
+            let dst_start = (cmd.box_.z as usize * resource.width as usize * resource.height as usize
+                + cmd.box_.y as usize * resource.width as usize
+                + cmd.box_.x as usize) * 4;
+
+            let bytes_to_copy = std::cmp::min(
+                (cmd.box_.w * cmd.box_.h * cmd.box_.d * 4) as usize,
+                resource.data.len().saturating_sub(dst_start),
+            );
+
+            if bytes_to_copy > 0 && dst_start + bytes_to_copy <= resource.data.len() {
+                let src_addr = GuestAddress(cmd.offset);
+                if mem
+                    .read_slice(&mut resource.data[dst_start..dst_start + bytes_to_copy], src_addr)
+                    .is_err()
+                {
+                    error!("Failed to read from guest memory during TRANSFER_TO_HOST_3D");
+                }
+            }
+
+            Self::create_response_header(VIRTIO_GPU_RESP_OK_NODATA)
+        } else {
+            Self::create_response_header(VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID)
+        }
+    }
+
+    /// Handle transfer from host 3D
+    fn handle_transfer_from_host_3d<M: GuestMemory>(
+        &mut self,
+        mem: &M,
+        cmd: &Transfer3D,
+    ) -> CtrlHeader {
+        if !self.virgl_enabled {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_UNSPEC);
+        }
+
+        if cmd.resource_id == 0 {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID);
+        }
+
+        let resources_3d = self.resources_3d.lock().expect("Failed to lock resources_3d mutex: another thread panicked while holding the lock");
+
+        if let Some(resource) = resources_3d.get(&cmd.resource_id) {
+            // Calculate source offset based on box coordinates
+            let src_start = (cmd.box_.z as usize * resource.width as usize * resource.height as usize
+                + cmd.box_.y as usize * resource.width as usize
+                + cmd.box_.x as usize) * 4;
+
+            let bytes_to_copy = std::cmp::min(
+                (cmd.box_.w * cmd.box_.h * cmd.box_.d * 4) as usize,
+                resource.data.len().saturating_sub(src_start),
+            );
+
+            if bytes_to_copy > 0 && src_start + bytes_to_copy <= resource.data.len() {
+                let dst_addr = GuestAddress(cmd.offset);
+                if mem
+                    .write_slice(&resource.data[src_start..src_start + bytes_to_copy], dst_addr)
+                    .is_err()
+                {
+                    error!("Failed to write to guest memory during TRANSFER_FROM_HOST_3D");
+                }
+            }
+
+            Self::create_response_header(VIRTIO_GPU_RESP_OK_NODATA)
+        } else {
+            Self::create_response_header(VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID)
+        }
+    }
+
+    /// Handle submit 3D (Gallium command buffer)
+    /// This is a simplified implementation that just acknowledges the command.
+    /// A full implementation would parse and execute Gallium commands.
+    fn handle_submit_3d(&mut self, ctx_id: u32, _cmd_data: &[u32]) -> CtrlHeader {
+        if !self.virgl_enabled {
+            return Self::create_response_header(VIRTIO_GPU_RESP_ERR_UNSPEC);
+        }
+
+        let contexts = self.virgl_contexts.lock().expect("Failed to lock virgl_contexts mutex: another thread panicked while holding the lock");
+
+        if contexts.contains_key(&ctx_id) {
+            // In a full implementation, this would parse and execute Gallium commands
+            // For software rendering, this would be a simplified interpreter
+            // For now, we just acknowledge the submission
+            Self::create_response_header(VIRTIO_GPU_RESP_OK_NODATA)
+        } else {
+            Self::create_response_header(VIRTIO_GPU_RESP_ERR_UNSPEC)
+        }
+    }
+
     /// Process the control queue
     fn process_control_queue(&mut self) -> Result<(), Error> {
         let mut used_descs = false;
@@ -643,6 +1081,80 @@ impl GpuEpollHandler {
                 VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING => {
                     // Simplified handling - just acknowledge
                     Self::create_response_header(VIRTIO_GPU_RESP_OK_NODATA)
+                }
+                // VIRGL 3D commands
+                VIRTIO_GPU_CMD_CTX_CREATE => {
+                    let cmd: CtxCreate = desc_chain
+                        .memory()
+                        .read_obj(head_desc.addr())
+                        .map_err(Error::GuestMemory)?;
+                    self.handle_ctx_create(&cmd)
+                }
+                VIRTIO_GPU_CMD_CTX_DESTROY => {
+                    let cmd: CtxDestroy = desc_chain
+                        .memory()
+                        .read_obj(head_desc.addr())
+                        .map_err(Error::GuestMemory)?;
+                    self.handle_ctx_destroy(&cmd)
+                }
+                VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE => {
+                    let cmd: CtxAttachResource = desc_chain
+                        .memory()
+                        .read_obj(head_desc.addr())
+                        .map_err(Error::GuestMemory)?;
+                    self.handle_ctx_attach_resource(&cmd)
+                }
+                VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE => {
+                    let cmd: CtxDetachResource = desc_chain
+                        .memory()
+                        .read_obj(head_desc.addr())
+                        .map_err(Error::GuestMemory)?;
+                    self.handle_ctx_detach_resource(&cmd)
+                }
+                VIRTIO_GPU_CMD_RESOURCE_CREATE_3D => {
+                    let cmd: ResourceCreate3D = desc_chain
+                        .memory()
+                        .read_obj(head_desc.addr())
+                        .map_err(Error::GuestMemory)?;
+                    self.handle_resource_create_3d(&cmd)
+                }
+                VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D => {
+                    let cmd: Transfer3D = desc_chain
+                        .memory()
+                        .read_obj(head_desc.addr())
+                        .map_err(Error::GuestMemory)?;
+                    self.handle_transfer_to_host_3d(desc_chain.memory(), &cmd)
+                }
+                VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D => {
+                    let cmd: Transfer3D = desc_chain
+                        .memory()
+                        .read_obj(head_desc.addr())
+                        .map_err(Error::GuestMemory)?;
+                    self.handle_transfer_from_host_3d(desc_chain.memory(), &cmd)
+                }
+                VIRTIO_GPU_CMD_SUBMIT_3D => {
+                    let cmd: Submit3D = desc_chain
+                        .memory()
+                        .read_obj(head_desc.addr())
+                        .map_err(Error::GuestMemory)?;
+
+                    // Read command buffer from next descriptor
+                    let mut cmd_data = Vec::new();
+                    if let Some(cmd_desc) = desc_chain.next() {
+                        if !cmd_desc.is_write_only() {
+                            let num_words = cmd.size as usize / 4;
+                            cmd_data.reserve(num_words);
+                            for i in 0..num_words {
+                                let offset = i * 4;
+                                if let Some(addr) = cmd_desc.addr().checked_add(offset as u64) {
+                                    if let Ok(word) = desc_chain.memory().read_obj::<u32>(addr) {
+                                        cmd_data.push(word);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.handle_submit_3d(header.ctx_id, &cmd_data)
                 }
                 _ => {
                     error!("Unknown GPU command: 0x{:x}", header.hdr_type);
@@ -818,8 +1330,11 @@ impl VirtioDevice for Gpu {
             kill_evt,
             pause_evt,
             resources: self.resources.clone(),
+            virgl_contexts: self.virgl_contexts.clone(),
+            resources_3d: self.resources_3d.clone(),
             display_width: self.display_width,
             display_height: self.display_height,
+            virgl_enabled: self.virgl_enabled,
         };
 
         let paused = self.common.paused.clone();
@@ -979,6 +1494,8 @@ mod tests {
 
         // Should have EDID feature
         assert!(gpu.features() & (1u64 << VIRTIO_GPU_F_EDID) != 0);
+        // Should have VIRGL feature enabled by default
+        assert!(gpu.features() & (1u64 << VIRTIO_GPU_F_VIRGL) != 0);
     }
 
     #[test]
@@ -989,5 +1506,157 @@ mod tests {
         // Ack features should not panic
         gpu.ack_features(0);
         gpu.ack_features(1u64 << VIRTIO_GPU_F_EDID);
+        gpu.ack_features(1u64 << VIRTIO_GPU_F_VIRGL);
+    }
+
+    #[test]
+    fn test_gpu_virgl_disabled() {
+        let exit_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let gpu = Gpu::new_with_virgl(1024, 768, false, SeccompAction::Allow, exit_evt).unwrap();
+
+        // Should have EDID feature
+        assert!(gpu.features() & (1u64 << VIRTIO_GPU_F_EDID) != 0);
+        // Should NOT have VIRGL feature
+        assert!(gpu.features() & (1u64 << VIRTIO_GPU_F_VIRGL) == 0);
+        assert!(!gpu.is_virgl_enabled());
+    }
+
+    #[test]
+    fn test_gpu_virgl_enabled() {
+        let exit_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let gpu = Gpu::new_with_virgl(1024, 768, true, SeccompAction::Allow, exit_evt).unwrap();
+
+        // Should have VIRGL feature
+        assert!(gpu.features() & (1u64 << VIRTIO_GPU_F_VIRGL) != 0);
+        assert!(gpu.is_virgl_enabled());
+    }
+
+    // ============== VIRGL 3D Tests ==============
+
+    #[test]
+    fn test_virgl_context_creation() {
+        let context = VirglContext::new(1, "test_context".to_string());
+        assert_eq!(context.id, 1);
+        assert_eq!(context.name, "test_context");
+        assert!(context.resources.is_empty());
+    }
+
+    #[test]
+    fn test_resource_3d_creation() {
+        let resource = Resource3D::new(
+            1,      // id
+            256,    // width
+            256,    // height
+            1,      // depth
+            67,     // format (R8G8B8A8)
+            2,      // target (TEXTURE_2D)
+            1,      // bind
+            0,      // nr_samples
+            0,      // flags
+        );
+        assert_eq!(resource.id, 1);
+        assert_eq!(resource.width, 256);
+        assert_eq!(resource.height, 256);
+        assert_eq!(resource.depth, 1);
+        assert_eq!(resource.data.len(), 256 * 256 * 1 * 4);
+    }
+
+    #[test]
+    fn test_box_3d() {
+        let box3d = Box3D {
+            x: 0,
+            y: 0,
+            z: 0,
+            w: 100,
+            h: 100,
+            d: 1,
+        };
+        assert_eq!(box3d.x, 0);
+        assert_eq!(box3d.w, 100);
+        assert_eq!(box3d.h, 100);
+        assert_eq!(box3d.d, 1);
+    }
+
+    #[test]
+    fn test_ctx_create_struct() {
+        let header = CtrlHeader {
+            hdr_type: VIRTIO_GPU_CMD_CTX_CREATE,
+            flags: 0,
+            fence_id: 0,
+            ctx_id: 1,
+            padding: 0,
+        };
+        let mut name = [0u8; 64];
+        let name_str = "test";
+        name[..name_str.len()].copy_from_slice(name_str.as_bytes());
+
+        let cmd = CtxCreate {
+            header,
+            nctx: name_str.len() as u32,
+            context_name: name,
+        };
+        assert_eq!(cmd.header.ctx_id, 1);
+        assert_eq!(cmd.nctx, 4);
+    }
+
+    #[test]
+    fn test_resource_create_3d_struct() {
+        let header = CtrlHeader {
+            hdr_type: VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
+            flags: 0,
+            fence_id: 0,
+            ctx_id: 0,
+            padding: 0,
+        };
+
+        let cmd = ResourceCreate3D {
+            header,
+            resource_id: 1,
+            format: 67,
+            width: 512,
+            height: 512,
+            depth: 1,
+            target: 2,
+            bind: 1,
+            nr_samples: 0,
+            flags: 0,
+            padding: 0,
+        };
+        assert_eq!(cmd.resource_id, 1);
+        assert_eq!(cmd.width, 512);
+        assert_eq!(cmd.height, 512);
+    }
+
+    #[test]
+    fn test_transfer_3d_struct() {
+        let header = CtrlHeader {
+            hdr_type: VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D,
+            flags: 0,
+            fence_id: 0,
+            ctx_id: 0,
+            padding: 0,
+        };
+
+        let box3d = Box3D {
+            x: 0,
+            y: 0,
+            z: 0,
+            w: 64,
+            h: 64,
+            d: 1,
+        };
+
+        let cmd = Transfer3D {
+            header,
+            resource_id: 1,
+            level: 0,
+            stride: 64 * 4,
+            layer_stride: 64 * 64 * 4,
+            box_: box3d,
+            offset: 0,
+        };
+        assert_eq!(cmd.resource_id, 1);
+        assert_eq!(cmd.box_.w, 64);
+        assert_eq!(cmd.box_.h, 64);
     }
 }

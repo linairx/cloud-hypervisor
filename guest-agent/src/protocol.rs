@@ -5,30 +5,93 @@
 //!
 //! These structures are mirrored in the Cloud Hypervisor frame_buffer module
 //! and must be kept in sync.
+//!
+//! # Overview
+//!
+//! The protocol defines the shared memory layout and message types used
+//! for communication between the host VMM and the guest agent.
+//!
+//! # Memory Layout
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                   Frame Buffer Header                        │
+//! │  - Magic number, version, dimensions                        │
+//! │  - Command/state synchronization                            │
+//! │  - Cursor metadata                                          │
+//! └─────────────────────────────────────────────────────────────┘
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                   Frame Metadata Array                       │
+//! │  - One entry per buffer                                     │
+//! │  - Frame number, timestamp, flags                           │
+//! └─────────────────────────────────────────────────────────────┘
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                   Frame Data Buffers                         │
+//! │  - Multiple buffers for triple buffering                    │
+//! │  - Actual pixel data                                        │
+//! └─────────────────────────────────────────────────────────────┘
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                   Cursor Data                                │
+//! │  - Cursor shape (BGRA pixels)                               │
+//! │  - Hotspot information                                      │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Synchronization
+//!
+//! The protocol uses atomic operations and flags for synchronization:
+//! - Host writes commands, Guest reads and executes
+//! - Guest writes state and frame data, Host reads
+//! - Active buffer index is used for triple buffering
 
 use serde::{Deserialize, Serialize};
 
-/// Magic number for frame buffer header validation: "FBMP"
+/// Magic number for frame buffer header validation: "FBMP".
+///
+/// Used to validate that the shared memory region contains valid data.
 pub const FRAME_BUFFER_MAGIC: u32 = 0x46424D50;
 
-/// Current protocol version
+/// Current protocol version.
+///
+/// Incremented when the protocol structure changes incompatibly.
 pub const FRAME_BUFFER_VERSION: u32 = 1;
 
-/// Default number of buffers (triple buffering)
+/// Default number of buffers (triple buffering).
+///
+/// Triple buffering reduces tearing and improves frame rate.
 pub const DEFAULT_BUFFER_COUNT: u32 = 3;
 
-/// Maximum cursor data size (64KB - enough for 128x128 BGRA cursor)
+/// Maximum cursor data size (64KB - enough for 128x128 BGRA cursor).
 pub const MAX_CURSOR_SIZE: u32 = 64 * 1024;
 
-/// Default audio buffer size (1MB)
+/// Default audio buffer size (1MB).
 pub const DEFAULT_AUDIO_BUFFER_SIZE: u32 = 1024 * 1024;
 
-/// Audio buffer magic number: "AUDI"
+/// Audio buffer magic number: "AUDI".
 pub const AUDIO_BUFFER_MAGIC: u32 = 0x41554449;
-/// Audio buffer version
+/// Audio buffer version.
 pub const AUDIO_BUFFER_VERSION: u32 = 1;
 
-/// Guest Agent commands (Host -> Guest)
+/// Guest Agent commands (Host -> Guest).
+///
+/// These commands are sent from the host VMM to control the guest agent.
+///
+/// # Example
+///
+/// ```ignore
+/// use guest_agent::protocol::GuestCommand;
+///
+/// // Host sends start capture command
+/// header.command = GuestCommand::StartCapture as u32;
+///
+/// // Guest reads and executes
+/// let cmd = GuestCommand::try_from(header.command)?;
+/// match cmd {
+///     GuestCommand::StartCapture => agent.start_capture()?,
+///     GuestCommand::StopCapture => agent.stop_capture()?,
+///     // ...
+/// }
+/// ```
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuestCommand {
@@ -62,7 +125,17 @@ impl TryFrom<u32> for GuestCommand {
     }
 }
 
-/// Guest Agent state (Guest -> Host)
+/// Guest Agent state (Guest -> Host).
+///
+/// The guest agent reports its current state to the host through
+/// the frame buffer header.
+///
+/// # State Transitions
+///
+/// ```text
+/// Initializing -> Idle -> Capturing <-> Idle
+///                    \-> Error
+/// ```
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuestState {
@@ -96,7 +169,15 @@ impl TryFrom<u32> for GuestState {
     }
 }
 
-/// Frame format enumeration
+/// Frame format enumeration.
+///
+/// Defines the pixel format for captured frames.
+///
+/// # Formats
+///
+/// - **Bgra32**: 32-bit BGRA, 4 bytes per pixel, most common
+/// - **Rgba32**: 32-bit RGBA, 4 bytes per pixel
+/// - **Nv12**: YUV 4:2:0, 1.5 bytes per pixel, video encoding
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameFormat {
@@ -137,7 +218,23 @@ impl FrameFormat {
     }
 }
 
-/// Frame metadata flags
+/// Frame metadata flags.
+///
+/// These flags provide additional information about each frame.
+///
+/// # Example
+///
+/// ```ignore
+/// use guest_agent::protocol::FrameFlags;
+///
+/// // Mark frame as keyframe
+/// metadata.flags = FrameFlags::KEYFRAME;
+///
+/// // Check if frame has error
+/// if metadata.flags.contains(FrameFlags::ERROR) {
+///     // Handle error
+/// }
+/// ```
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct FrameFlags: u32 {
@@ -160,97 +257,141 @@ impl Default for FrameFlags {
     }
 }
 
-/// Frame metadata (placed after header, one per buffer)
+/// Frame metadata (placed after header, one per buffer).
+///
+/// Each frame buffer has associated metadata that describes the frame.
+///
+/// # Memory Layout
+///
+/// This structure is `#[repr(C)]` for stable memory layout across FFI.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameMetadata {
-    /// Frame number (monotonically increasing)
+    /// Frame number (monotonically increasing).
+    ///
+    /// Used to detect dropped frames.
     pub frame_number: u64,
-    /// Timestamp in nanoseconds
+    /// Timestamp in nanoseconds.
+    ///
+    /// Typically from a monotonic clock for timing accuracy.
     pub timestamp_ns: u64,
-    /// Frame flags
+    /// Frame flags.
+    ///
+    /// Indicates keyframe, error, etc.
     pub flags: FrameFlags,
-    /// Actual data size in bytes
+    /// Actual data size in bytes.
+    ///
+    /// May be less than buffer size for compressed frames.
     pub data_size: u32,
     /// Reserved for future use
     pub reserved: [u8; 16],
 }
 
-/// Frame buffer header (fixed size, at start of shared memory)
+/// Frame buffer header (fixed size, at start of shared memory).
+///
+/// This is the main control structure for the shared memory region.
+/// It contains configuration, state, and synchronization fields.
+///
+/// # Memory Layout
+///
+/// This structure is `#[repr(C)]` for stable memory layout across FFI.
+/// The header is followed by frame metadata, then frame data, then cursor data.
+///
+/// # Synchronization
+///
+/// - `active_index`: Points to the buffer currently being written
+/// - `command`: Host sends commands, guest reads and executes
+/// - `guest_state`: Guest reports state, host reads
+/// - `cursor_updated`: Incremented when cursor shape changes
 #[repr(C)]
 #[derive(Debug)]
 pub struct FrameBufferHeader {
-    /// Magic number for validation
+    /// Magic number for validation (`FRAME_BUFFER_MAGIC`)
     pub magic: u32,
-    /// Protocol version
+    /// Protocol version (`FRAME_BUFFER_VERSION`)
     pub version: u32,
-    /// Number of buffers
+    /// Number of buffers (typically 3 for triple buffering)
     pub buffer_count: u32,
-    /// Size of each buffer
+    /// Size of each buffer in bytes
     pub buffer_size: u64,
-    /// Frame width
+    /// Frame width in pixels
     pub frame_width: u32,
-    /// Frame height
+    /// Frame height in pixels
     pub frame_height: u32,
     /// Pixel format
     pub format: FrameFormat,
-    /// Current active buffer index
+    /// Current active buffer index (0-based)
     pub active_index: u32,
-    /// Total frame count
+    /// Total frame count since capture started
     pub frame_count: u64,
-    /// Host -> Guest command
+    /// Host -> Guest command (see `GuestCommand`)
     pub command: u32,
-    /// Guest -> Host state
+    /// Guest -> Host state (see `GuestState`)
     pub guest_state: u32,
-    /// Guest Agent PID
+    /// Guest Agent PID (for debugging)
     pub guest_pid: u32,
-    /// Cursor data offset
+    /// Cursor data offset from start of shared memory
     pub cursor_offset: u64,
-    /// Cursor data size
+    /// Cursor data size in bytes
     pub cursor_size: u32,
-    /// Cursor hotspot X
+    /// Cursor hotspot X coordinate
     pub cursor_hot_x: i16,
-    /// Cursor hotspot Y
+    /// Cursor hotspot Y coordinate
     pub cursor_hot_y: i16,
-    /// Cursor width
+    /// Cursor width in pixels
     pub cursor_width: u16,
-    /// Cursor height
+    /// Cursor height in pixels
     pub cursor_height: u16,
-    /// Cursor update counter
+    /// Cursor update counter (incremented on shape change)
     pub cursor_updated: u32,
 }
 
-/// Cursor metadata
+/// Cursor metadata.
+///
+/// Contains cursor position and visibility information.
+/// Updated by the guest agent on each frame.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CursorMetadata {
-    /// Cursor X position
+    /// Cursor X position in pixels
     pub x: i32,
-    /// Cursor Y position
+    /// Cursor Y position in pixels
     pub y: i32,
-    /// Cursor visibility
+    /// Cursor visibility (0=hidden, 1=visible)
     pub visible: u32,
-    /// Shape updated flag
+    /// Shape updated flag (non-zero if shape changed)
     pub shape_updated: u32,
 }
 
-/// Cursor shape info
+/// Cursor shape info.
+///
+/// Describes the cursor image dimensions and hotspot.
+/// The actual pixel data follows in BGRA format.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CursorShapeInfo {
-    /// Cursor width
+    /// Cursor width in pixels
     pub width: u16,
-    /// Cursor height
+    /// Cursor height in pixels
     pub height: u16,
-    /// Hotspot X
+    /// Hotspot X coordinate (click point)
     pub hot_x: i16,
-    /// Hotspot Y
+    /// Hotspot Y coordinate (click point)
     pub hot_y: i16,
-    /// Data size
+    /// Size of cursor data in bytes (width * height * 4)
     pub data_size: u32,
 }
 
-/// Audio format
+/// Audio format.
+///
+/// Defines the sample format for audio capture.
+///
+/// # Formats
+///
+/// - **PcmS16Le**: 16-bit signed PCM, most common
+/// - **PcmS24Le**: 24-bit signed PCM, higher quality
+/// - **PcmS32Le**: 32-bit signed PCM, highest quality
+/// - **FloatLe**: 32-bit float, professional use
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioFormat {
@@ -270,48 +411,72 @@ impl Default for AudioFormat {
     }
 }
 
-/// Audio buffer header
+/// Audio buffer header.
+///
+/// Controls the shared memory ring buffer for audio streaming.
+/// Uses a producer-consumer model with atomic positions.
+///
+/// # Synchronization
+///
+/// - Guest writes audio data and updates `write_pos`
+/// - Host reads audio data and updates `read_pos`
+/// - Buffer wraps when position reaches `buffer_size`
 #[repr(C)]
 #[derive(Debug)]
 pub struct AudioBufferHeader {
-    /// Magic: "AUDI"
+    /// Magic number for validation (`AUDIO_BUFFER_MAGIC`)
     pub magic: u32,
-    /// Version
+    /// Protocol version (`AUDIO_BUFFER_VERSION`)
     pub version: u32,
-    /// Audio format
+    /// Audio sample format
     pub format: AudioFormat,
-    /// Sample rate
+    /// Sample rate in Hz (e.g., 44100, 48000)
     pub sample_rate: u32,
-    /// Channels
+    /// Number of channels (1=mono, 2=stereo)
     pub channels: u8,
-    /// Reserved
+    /// Reserved for alignment
     pub reserved: [u8; 3],
-    /// Buffer size
+    /// Total buffer size in bytes
     pub buffer_size: u32,
     /// Write position (atomic, updated by guest)
     pub write_pos: u32,
     /// Read position (atomic, updated by host)
     pub read_pos: u32,
-    /// Total written
+    /// Total bytes written since start
     pub total_written: u64,
-    /// Active flag
+    /// Active flag (1=capturing, 0=stopped)
     pub active: u32,
 }
 
-/// VirtIO Input event (for VirtIO backend)
+/// VirtIO Input event (for VirtIO backend).
+///
+/// Represents a single input event in Linux evdev format.
+/// Used by the VirtIO input backend for event injection.
+///
+/// # Event Types
+///
+/// - `0x00` (EV_SYN): Synchronization event
+/// - `0x01` (EV_KEY): Keyboard/button event
+/// - `0x02` (EV_REL): Relative mouse movement
+/// - `0x03` (EV_ABS): Absolute mouse position
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VirtioInputEvent {
-    /// Event type
+    /// Event type (EV_KEY, EV_REL, EV_SYN, etc.)
     pub ev_type: u16,
-    /// Event code
+    /// Event code (key code, button code, or axis)
     pub code: u16,
-    /// Event value
+    /// Event value (1=press, 0=release, or movement delta)
     pub value: u32,
 }
 
 impl VirtioInputEvent {
-    /// Create a keyboard event
+    /// Create a keyboard event.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - Linux key code (e.g., KEY_A = 0x1E)
+    /// * `pressed` - `true` for press, `false` for release
     pub fn keyboard(code: u16, pressed: bool) -> Self {
         Self {
             ev_type: 0x01, // EV_KEY
@@ -320,7 +485,12 @@ impl VirtioInputEvent {
         }
     }
 
-    /// Create a relative mouse event
+    /// Create a relative mouse event.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - Relative axis (REL_X = 0x00, REL_Y = 0x01, REL_WHEEL = 0x08)
+    /// * `value` - Movement delta
     pub fn rel(code: u16, value: i32) -> Self {
         Self {
             ev_type: 0x02, // EV_REL
@@ -329,7 +499,9 @@ impl VirtioInputEvent {
         }
     }
 
-    /// Create a sync event
+    /// Create a sync event.
+    ///
+    /// Sync events mark the end of a batch of input events.
     pub fn syn() -> Self {
         Self {
             ev_type: 0x00, // EV_SYN
@@ -339,7 +511,9 @@ impl VirtioInputEvent {
     }
 }
 
-/// Input event type
+/// Input event type (for protocol communication).
+///
+/// Tagged union of keyboard and mouse events for serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InputEvent {
     /// Keyboard event
@@ -348,39 +522,50 @@ pub enum InputEvent {
     Mouse(MouseEvent),
 }
 
-/// Keyboard event
+/// Keyboard event (protocol version).
+///
+/// Represents a keyboard action for input injection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyboardEvent {
-    /// Key action
+    /// Key action (press, release, or type)
     pub action: KeyAction,
-    /// Key code
+    /// Key code (scancode)
     pub code: u16,
-    /// Modifiers
+    /// Active modifiers
     #[serde(default)]
     pub modifiers: KeyboardModifiers,
 }
 
-/// Key action
+/// Key action type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyAction {
+    /// Key press
     Press,
+    /// Key release
     Release,
+    /// Key press and release (convenience)
     Type,
 }
 
-/// Keyboard modifiers
+/// Keyboard modifier states.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct KeyboardModifiers {
+    /// Control key
     pub ctrl: bool,
+    /// Alt key
     pub alt: bool,
+    /// Shift key
     pub shift: bool,
+    /// Meta/Windows key
     pub meta: bool,
 }
 
-/// Mouse event
+/// Mouse event (protocol version).
+///
+/// Represents a mouse action for input injection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MouseEvent {
-    /// Action
+    /// Mouse action type
     pub action: MouseAction,
     /// X coordinate or delta
     pub x: i32,
@@ -388,40 +573,56 @@ pub struct MouseEvent {
     pub y: i32,
     /// Z coordinate (scroll wheel)
     pub z: i32,
-    /// Button
+    /// Button for button actions
     pub button: Option<MouseButton>,
-    /// Button states
+    /// All button states
     #[serde(default)]
     pub buttons: MouseButtons,
 }
 
-/// Mouse action
+/// Mouse action type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MouseAction {
+    /// Relative movement
     Move,
+    /// Absolute positioning
     MoveAbsolute,
+    /// Button press
     ButtonPress,
+    /// Button release
     ButtonRelease,
+    /// Button click (press + release)
     Click,
+    /// Scroll wheel
     Scroll,
 }
 
-/// Mouse button
+/// Mouse button identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MouseButton {
+    /// Left button
     Left,
+    /// Right button
     Right,
+    /// Middle button
     Middle,
+    /// Side button
     Side,
+    /// Extra button
     Extra,
 }
 
-/// Mouse button states
+/// Mouse button states.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct MouseButtons {
+    /// Left button state
     pub left: bool,
+    /// Right button state
     pub right: bool,
+    /// Middle button state
     pub middle: bool,
+    /// Side button state
     pub side: bool,
+    /// Extra button state
     pub extra: bool,
 }
