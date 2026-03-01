@@ -48,7 +48,127 @@ impl Default for AudioConfig {
 }
 
 /// PulseAudio capture implementation
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "pulseaudio"))]
+pub mod pulseaudio {
+    use super::*;
+    use libpulse_binding::{sample, stream::Direction};
+    use libpulse_simple_binding::Simple;
+
+    pub struct PulseAudioCapture {
+        config: AudioConfig,
+        active: bool,
+        /// PulseAudio simple connection
+        pa_simple: Option<Simple>,
+        /// Buffer for reading
+        buffer: Vec<u8>,
+    }
+
+    impl PulseAudioCapture {
+        pub fn new() -> io::Result<Self> {
+            Ok(Self {
+                config: AudioConfig::default(),
+                active: false,
+                pa_simple: None,
+                buffer: Vec::new(),
+            })
+        }
+
+        /// Convert AudioFormat to PulseAudio sample format
+        fn to_pa_format(format: AudioFormat) -> sample::Format {
+            match format {
+                AudioFormat::PcmS16Le => sample::Format::S16le,
+                AudioFormat::PcmS24Le => sample::Format::S24le,
+                AudioFormat::PcmS32Le => sample::Format::S32le,
+                AudioFormat::FloatLe => sample::Format::F32le,
+            }
+        }
+
+        /// Create PulseAudio sample spec
+        fn create_spec(&self) -> sample::Spec {
+            sample::Spec {
+                format: Self::to_pa_format(self.config.format),
+                channels: self.config.channels,
+                rate: self.config.sample_rate,
+            }
+        }
+    }
+
+    impl AudioCapture for PulseAudioCapture {
+        fn init(&mut self, sample_rate: u32, channels: u8, format: AudioFormat) -> io::Result<()> {
+            self.config.sample_rate = sample_rate;
+            self.config.channels = channels;
+            self.config.format = format;
+
+            // Pre-allocate buffer for one buffer duration
+            let bytes_per_sample = match format {
+                AudioFormat::PcmS16Le => 2,
+                AudioFormat::PcmS24Le => 3,
+                AudioFormat::PcmS32Le | AudioFormat::FloatLe => 4,
+            };
+            let buffer_size = sample_rate as usize
+                * (self.config.buffer_duration_ms as usize) / 1000
+                * channels as usize
+                * bytes_per_sample;
+            self.buffer.resize(buffer_size, 0);
+
+            Ok(())
+        }
+
+        fn start(&mut self) -> io::Result<()> {
+            if self.active {
+                return Ok(());
+            }
+
+            let spec = self.create_spec();
+
+            // Connect to PulseAudio for recording (monitor source)
+            let simple = Simple::new(
+                None,               // Use default server
+                "lg-guest-agent",   // Application name
+                Direction::Record,  // Recording direction
+                None,               // Use default device (monitor)
+                "audio capture",    // Stream description
+                &spec,              // Sample spec
+                None,               // Default channel map
+                None,               // Default buffering attributes
+            ).map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, format!("{}", e)))?;
+
+            self.pa_simple = Some(simple);
+            self.active = true;
+            Ok(())
+        }
+
+        fn stop(&mut self) -> io::Result<()> {
+            self.pa_simple = None;
+            self.active = false;
+            Ok(())
+        }
+
+        fn read_samples(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.active {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "Not capturing"));
+            }
+
+            let simple = self.pa_simple.as_ref().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "PulseAudio not connected")
+            })?;
+
+            let to_read = buffer.len().min(self.buffer.len());
+
+            simple.read(&mut buffer[..to_read])
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{}", e)))?;
+
+            Ok(to_read)
+        }
+
+        fn is_capturing(&self) -> bool {
+            self.active
+        }
+    }
+}
+
+/// PulseAudio capture stub (when feature is disabled)
+#[cfg(all(target_os = "linux", not(feature = "pulseaudio")))]
 pub mod pulseaudio {
     use super::*;
 
@@ -75,9 +195,10 @@ pub mod pulseaudio {
         }
 
         fn start(&mut self) -> io::Result<()> {
-            // Would use libpulse-simple
-            self.active = true;
-            Ok(())
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PulseAudio support not enabled. Rebuild with --features pulseaudio",
+            ))
         }
 
         fn stop(&mut self) -> io::Result<()> {
@@ -86,11 +207,10 @@ pub mod pulseaudio {
         }
 
         fn read_samples(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
-            if !self.active {
-                return Err(io::Error::new(io::ErrorKind::NotConnected, "Not capturing"));
-            }
-            // Would read from PulseAudio
-            Ok(0)
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PulseAudio support not enabled",
+            ))
         }
 
         fn is_capturing(&self) -> bool {

@@ -23,6 +23,11 @@ pub const MAX_CURSOR_SIZE: u32 = 64 * 1024;
 /// Default audio buffer size (1MB)
 pub const DEFAULT_AUDIO_BUFFER_SIZE: u32 = 1024 * 1024;
 
+/// Audio buffer magic number: "AUDI"
+pub const AUDIO_BUFFER_MAGIC: u32 = 0x41554449;
+/// Audio buffer version
+pub const AUDIO_BUFFER_VERSION: u32 = 1;
+
 /// Guest Agent commands (Host -> Guest)
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,9 +288,9 @@ pub struct AudioBufferHeader {
     pub reserved: [u8; 3],
     /// Buffer size
     pub buffer_size: u32,
-    /// Write position
+    /// Write position (atomic, updated by guest)
     pub write_pos: u32,
-    /// Read position
+    /// Read position (atomic, updated by host)
     pub read_pos: u32,
     /// Total written
     pub total_written: u64,

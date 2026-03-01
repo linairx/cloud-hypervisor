@@ -236,11 +236,24 @@ impl Trb {
     }
 
     /// Create from bytes
+    ///
+    /// # Panics
+    ///
+    /// This function will not panic as the input slice is always the correct size (TRB_SIZE).
+    #[inline]
     pub fn from_bytes(bytes: &[u8; TRB_SIZE]) -> Self {
+        // SAFETY: The slice sizes are guaranteed by the array type [u8; TRB_SIZE]
+        // and the const ranges used for slicing.
         Self {
-            parameter: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-            status: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            control: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            parameter: u64::from_le_bytes(
+                bytes[0..8].try_into().expect("slice has correct length"),
+            ),
+            status: u32::from_le_bytes(
+                bytes[8..12].try_into().expect("slice has correct length"),
+            ),
+            control: u32::from_le_bytes(
+                bytes[12..16].try_into().expect("slice has correct length"),
+            ),
         }
     }
 }

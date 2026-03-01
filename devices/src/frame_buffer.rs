@@ -1054,4 +1054,157 @@ mod tests {
         assert_eq!(index, 1);
         assert_eq!(count, 1);
     }
+
+    // ========== Audio Tests ==========
+
+    #[test]
+    fn test_audio_format_conversion() {
+        assert_eq!(AudioFormat::try_from(0).unwrap(), AudioFormat::PcmS16Le);
+        assert_eq!(AudioFormat::try_from(1).unwrap(), AudioFormat::PcmS24Le);
+        assert_eq!(AudioFormat::try_from(2).unwrap(), AudioFormat::PcmS32Le);
+        assert_eq!(AudioFormat::try_from(3).unwrap(), AudioFormat::FloatLe);
+        assert!(AudioFormat::try_from(4).is_err());
+    }
+
+    #[test]
+    fn test_audio_format_bytes_per_sample() {
+        assert_eq!(AudioFormat::PcmS16Le.bytes_per_sample(), 2);
+        assert_eq!(AudioFormat::PcmS24Le.bytes_per_sample(), 3);
+        assert_eq!(AudioFormat::PcmS32Le.bytes_per_sample(), 4);
+        assert_eq!(AudioFormat::FloatLe.bytes_per_sample(), 4);
+    }
+
+    #[test]
+    fn test_audio_buffer_header_creation() {
+        let header = AudioBufferHeader::new(
+            AudioFormat::PcmS16Le,
+            48000,
+            2,
+            1024 * 1024,
+        );
+
+        assert!(header.validate());
+        assert_eq!(header.magic, AUDIO_BUFFER_MAGIC);
+        assert_eq!(header.version, AUDIO_BUFFER_VERSION);
+        assert_eq!(header.sample_rate, 48000);
+        assert_eq!(header.channels, 2);
+        assert_eq!(header.buffer_size, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_audio_buffer_default() {
+        let header = AudioBufferHeader::default();
+
+        assert!(header.validate());
+        assert_eq!(header.format, AudioFormat::PcmS16Le);
+        assert_eq!(header.sample_rate, DEFAULT_SAMPLE_RATE);
+        assert_eq!(header.channels, DEFAULT_CHANNELS);
+        assert_eq!(header.buffer_size, DEFAULT_AUDIO_BUFFER_SIZE);
+    }
+
+    #[test]
+    fn test_audio_buffer_available() {
+        let mut header = AudioBufferHeader::default();
+
+        // Initially empty
+        assert_eq!(header.available_to_read(), 0);
+
+        // Simulate write
+        header.write_pos.store(100, Ordering::Release);
+        assert_eq!(header.available_to_read(), 100);
+
+        // Simulate read
+        header.read_pos.store(50, Ordering::Release);
+        assert_eq!(header.available_to_read(), 50);
+    }
+
+    #[test]
+    fn test_audio_buffer_wrap_around() {
+        let mut header = AudioBufferHeader::new(
+            AudioFormat::PcmS16Le,
+            48000,
+            2,
+            1000, // Small buffer for testing
+        );
+
+        // Set up wrap-around scenario
+        header.read_pos.store(900, Ordering::Release);
+        header.write_pos.store(100, Ordering::Release);
+
+        // Available = (100 - 900 + 1000) = 200
+        assert_eq!(header.available_to_read(), 200);
+    }
+
+    #[test]
+    fn test_audio_buffer_clone() {
+        let header = AudioBufferHeader::default();
+        header.write_pos.store(500, Ordering::Release);
+
+        let cloned = header.clone();
+        assert_eq!(cloned.write_pos.load(Ordering::Acquire), 500);
+        assert!(cloned.validate());
+    }
+
+    #[test]
+    fn test_audio_buffer_total_layout_size() {
+        let header = AudioBufferHeader::new(
+            AudioFormat::PcmS16Le,
+            48000,
+            2,
+            1024,
+        );
+
+        let expected_size = std::mem::size_of::<AudioBufferHeader>() + 1024;
+        assert_eq!(header.total_layout_size(), expected_size);
+    }
+
+    #[test]
+    fn test_cursor_metadata() {
+        let cursor = CursorMetadata {
+            x: 100,
+            y: 200,
+            visible: 1,
+            shape_updated: 0,
+            reserved: [0u8; 16],
+        };
+
+        assert_eq!(cursor.x, 100);
+        assert_eq!(cursor.y, 200);
+        assert_eq!(cursor.visible, 1);
+    }
+
+    #[test]
+    fn test_cursor_shape_info() {
+        let shape = CursorShapeInfo {
+            width: 32,
+            height: 32,
+            hot_x: 0,
+            hot_y: 0,
+            data_size: 32 * 32 * 4,
+            reserved: [0u8; 20],
+        };
+
+        assert_eq!(shape.width, 32);
+        assert_eq!(shape.height, 32);
+        assert_eq!(shape.data_size, 4096);
+    }
+
+    #[test]
+    fn test_frame_buffer_header_cursor_operations() {
+        let header = FrameBufferHeader::new(3, 1024, 100, 100, FrameFormat::Bgra32);
+
+        // Initially no cursor data
+        assert!(!header.has_cursor_data());
+
+        // Set cursor shape info
+        header.set_cursor_shape_info(32, 32, 0, 0, 4096);
+
+        // Get cursor shape
+        let shape = header.get_cursor_shape();
+        assert_eq!(shape.width, 32);
+        assert_eq!(shape.height, 32);
+
+        // Cursor update count should have incremented
+        assert!(header.cursor_update_count() > 0);
+    }
 }

@@ -150,13 +150,15 @@ impl InputBackend for Ps2Backend {
 }
 
 // ============================================================================
-// VirtIO Input Backend (Placeholder)
+// VirtIO Input Backend
 // ============================================================================
 
 /// VirtIO input backend
 pub struct VirtioInputBackend {
     capabilities: InputCapabilities,
     ready: bool,
+    /// Reference to VirtIO Input device for injection
+    device: Option<std::sync::Arc<std::sync::Mutex<virtio_devices::VirtioInput>>>,
 }
 
 impl VirtioInputBackend {
@@ -174,12 +176,37 @@ impl VirtioInputBackend {
                 description: "VirtIO input device",
             },
             ready: false,
+            device: None,
         }
     }
 
     /// Set ready state
     pub fn set_ready(&mut self, ready: bool) {
         self.ready = ready;
+    }
+
+    /// Set the VirtIO Input device reference
+    pub fn set_device(&mut self, device: std::sync::Arc<std::sync::Mutex<virtio_devices::VirtioInput>>) {
+        self.device = Some(device);
+    }
+
+    /// Convert keyboard action to pressed boolean
+    fn keyboard_action_to_pressed(action: super::event::KeyboardAction) -> bool {
+        match action {
+            super::event::KeyboardAction::Press | super::event::KeyboardAction::Type => true,
+            super::event::KeyboardAction::Release => false,
+        }
+    }
+
+    /// Convert mouse button to Linux input code
+    fn mouse_button_to_code(button: super::event::MouseButton) -> u16 {
+        match button {
+            super::event::MouseButton::Left => 0x110,    // BTN_LEFT
+            super::event::MouseButton::Right => 0x111,   // BTN_RIGHT
+            super::event::MouseButton::Middle => 0x112,  // BTN_MIDDLE
+            super::event::MouseButton::Side => 0x113,    // BTN_SIDE
+            super::event::MouseButton::Extra => 0x114,   // BTN_EXTRA
+        }
     }
 }
 
@@ -202,24 +229,82 @@ impl InputBackend for VirtioInputBackend {
         self.ready
     }
 
-    fn inject_keyboard(&mut self, _event: &KeyboardEvent) -> Result<()> {
+    fn inject_keyboard(&mut self, event: &KeyboardEvent) -> Result<()> {
         if !self.ready {
             return Err(InputError::DeviceNotReady);
         }
-        // TODO: Implement virtio-input injection
-        Err(InputError::UnsupportedAction(
-            "virtio-input not yet implemented".to_string(),
-        ))
+
+        let device = self.device.as_ref().ok_or_else(|| {
+            InputError::BackendNotAvailable("VirtIO Input device not set".to_string())
+        })?;
+
+        let pressed = Self::keyboard_action_to_pressed(event.action);
+
+        // Handle Type action as Press + Release
+        if matches!(event.action, super::event::KeyboardAction::Type) {
+            if let Ok(dev) = device.lock() {
+                dev.inject_keyboard(event.code, true)
+                    .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
+                dev.inject_keyboard(event.code, false)
+                    .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
+            }
+        } else {
+            if let Ok(dev) = device.lock() {
+                dev.inject_keyboard(event.code, pressed)
+                    .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
+            }
+        }
+
+        Ok(())
     }
 
-    fn inject_mouse(&mut self, _event: &MouseEvent) -> Result<()> {
+    fn inject_mouse(&mut self, event: &MouseEvent) -> Result<()> {
         if !self.ready {
             return Err(InputError::DeviceNotReady);
         }
-        // TODO: Implement virtio-input injection
-        Err(InputError::UnsupportedAction(
-            "virtio-input not yet implemented".to_string(),
-        ))
+
+        let device = self.device.as_ref().ok_or_else(|| {
+            InputError::BackendNotAvailable("VirtIO Input device not set".to_string())
+        })?;
+
+        if let Ok(dev) = device.lock() {
+            match event.action {
+                super::event::MouseAction::Move => {
+                    // Relative movement
+                    dev.inject_mouse_rel(event.x, event.y)
+                        .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
+                }
+                super::event::MouseAction::MoveAbsolute => {
+                    // For absolute positioning, we need to track position and compute relative
+                    // This is a simplified implementation
+                    dev.inject_mouse_rel(event.x, event.y)
+                        .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
+                }
+                super::event::MouseAction::ButtonPress | super::event::MouseAction::ButtonRelease => {
+                    if let Some(ref button) = event.button {
+                        let code = Self::mouse_button_to_code(*button);
+                        let pressed = matches!(event.action, super::event::MouseAction::ButtonPress);
+                        dev.inject_mouse_button(code, pressed)
+                            .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
+                    }
+                }
+                super::event::MouseAction::Click => {
+                    if let Some(ref button) = event.button {
+                        let code = Self::mouse_button_to_code(*button);
+                        dev.inject_mouse_button(code, true)
+                            .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
+                        dev.inject_mouse_button(code, false)
+                            .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
+                    }
+                }
+                super::event::MouseAction::Scroll => {
+                    dev.inject_mouse_wheel(event.z)
+                        .map_err(|e| InputError::InjectionFailed(e.to_string()))?;
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

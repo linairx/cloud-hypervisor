@@ -341,4 +341,106 @@ impl SharedMemory {
 
         Ok(())
     }
+
+    /// Get audio buffer header pointer
+    /// Audio buffer is placed after cursor data in the shared memory layout
+    fn get_audio_header_ptr(&mut self) -> *mut AudioBufferHeader {
+        // Audio buffer offset: header + metadata + frame buffers + cursor (metadata + shape + data)
+        let header = self.header();
+        let header_size = std::mem::size_of::<FrameBufferHeader>();
+        let metadata_size = header.buffer_count as usize * std::mem::size_of::<FrameMetadata>();
+        let frame_buffers_size = header.buffer_count as usize * header.buffer_size as usize;
+        let cursor_metadata_size = 32; // CursorMetadata
+        let cursor_shape_size = 32;    // CursorShapeInfo
+        let cursor_data_size = MAX_CURSOR_SIZE as usize;
+
+        let audio_offset = header_size
+            + metadata_size
+            + frame_buffers_size
+            + cursor_metadata_size
+            + cursor_shape_size
+            + cursor_data_size;
+
+        unsafe { self.mmap.as_mut_ptr().add(audio_offset) as *mut AudioBufferHeader }
+    }
+
+    /// Get audio data buffer pointer (after audio header)
+    fn get_audio_data_ptr(&mut self) -> *mut u8 {
+        let audio_header_ptr = self.get_audio_header_ptr();
+        unsafe {
+            audio_header_ptr.add(std::mem::size_of::<AudioBufferHeader>()) as *mut u8
+        }
+    }
+
+    /// Write audio samples to the shared memory ring buffer
+    /// This implements a simple ring buffer write operation
+    pub fn write_audio(&mut self, data: &[u8]) -> io::Result<()> {
+        let audio_header_ptr = self.get_audio_header_ptr();
+
+        unsafe {
+            let header = &mut *audio_header_ptr;
+
+            // Validate magic
+            if header.magic != AUDIO_BUFFER_MAGIC {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Audio buffer not initialized",
+                ));
+            }
+
+            let buffer_size = header.buffer_size as usize;
+            if buffer_size == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Audio buffer size is zero",
+                ));
+            }
+
+            // Read current positions
+            let write_pos = header.write_pos as usize;
+            let read_pos = header.read_pos as usize;
+
+            // Calculate available space
+            let available = if write_pos >= read_pos {
+                buffer_size - (write_pos - read_pos) - 1
+            } else {
+                read_pos - write_pos - 1
+            };
+
+            if data.len() > available {
+                // Buffer overflow - drop data or partial write
+                // Here we do a partial write with available space
+                let to_write = data.len().min(available);
+                if to_write == 0 {
+                    return Ok(());
+                }
+            }
+
+            let data_ptr = self.get_audio_data_ptr();
+            let to_write = data.len().min(available);
+
+            // Write to ring buffer (may wrap around)
+            let first_chunk = to_write.min(buffer_size - write_pos);
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                data_ptr.add(write_pos),
+                first_chunk,
+            );
+
+            // Wrap around if needed
+            if first_chunk < to_write {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(first_chunk),
+                    data_ptr,
+                    to_write - first_chunk,
+                );
+            }
+
+            // Update write position
+            header.write_pos = ((write_pos + to_write) % buffer_size) as u32;
+            header.total_written += to_write as u64;
+        }
+
+        Ok(())
+    }
 }

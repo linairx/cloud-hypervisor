@@ -463,4 +463,246 @@ mod tests {
         assert!(stats.batches_processed > 0);
         assert!(stats.events_processed > 0);
     }
+
+    #[test]
+    fn test_adaptive_tuning() {
+        let config = BatchConfig {
+            max_batch_size: 8,
+            flush_interval_us: 1000000,
+            adaptive: true,
+        };
+        let mut batcher = EventBatcher::new(config);
+
+        // Add many events to trigger adaptive tuning
+        for _ in 0..200 {
+            batcher.push_keyboard(KeyboardEvent {
+                action: KeyboardAction::Press,
+                code: 0,
+                modifiers: Default::default(),
+            });
+        }
+
+        // After 100+ batches, adaptive tuning may increase batch size
+        // if average is close to max
+        let stats = batcher.stats();
+        assert!(stats.batches_processed >= 25); // 200 events / 8 per batch
+    }
+
+    #[test]
+    fn test_flush_all() {
+        let mut batcher = EventBatcher::default_batcher();
+
+        batcher.push_keyboard(KeyboardEvent {
+            action: KeyboardAction::Press,
+            code: 0,
+            modifiers: Default::default(),
+        });
+
+        // Should not have pending before flush
+        assert!(!batcher.has_pending());
+
+        // Force flush
+        batcher.flush_all();
+
+        // Now should have pending
+        assert!(batcher.has_pending());
+    }
+
+    #[test]
+    fn test_peek_batch() {
+        let config = BatchConfig {
+            max_batch_size: 2,
+            flush_interval_us: 1000000,
+            adaptive: false,
+        };
+        let mut batcher = EventBatcher::new(config);
+
+        batcher.push_keyboard(KeyboardEvent {
+            action: KeyboardAction::Press,
+            code: 1,
+            modifiers: Default::default(),
+        });
+        batcher.push_keyboard(KeyboardEvent {
+            action: KeyboardAction::Press,
+            code: 2,
+            modifiers: Default::default(),
+        });
+
+        // Should have pending batch
+        assert!(batcher.has_pending());
+
+        // Peek should return the batch without removing
+        let peeked = batcher.peek_batch();
+        assert!(peeked.is_some());
+        assert_eq!(peeked.unwrap().len(), 2);
+
+        // Still should have pending after peek
+        assert!(batcher.has_pending());
+
+        // Pop should remove it
+        let popped = batcher.pop_batch();
+        assert!(popped.is_some());
+        assert!(!batcher.has_pending());
+    }
+
+    #[test]
+    fn test_pending_count() {
+        let config = BatchConfig {
+            max_batch_size: 2,
+            flush_interval_us: 1000000,
+            adaptive: false,
+        };
+        let mut batcher = EventBatcher::new(config);
+
+        assert_eq!(batcher.pending_count(), 0);
+
+        // Add 4 events = 2 batches
+        for i in 0..4 {
+            batcher.push_keyboard(KeyboardEvent {
+                action: KeyboardAction::Press,
+                code: i,
+                modifiers: Default::default(),
+            });
+        }
+
+        assert_eq!(batcher.pending_count(), 2);
+    }
+
+    #[test]
+    fn test_pop_request() {
+        let config = BatchConfig {
+            max_batch_size: 2,
+            flush_interval_us: 1000000,
+            adaptive: false,
+        };
+        let mut batcher = EventBatcher::new(config);
+
+        batcher.push_keyboard(KeyboardEvent {
+            action: KeyboardAction::Press,
+            code: 0x1E,
+            modifiers: Default::default(),
+        });
+        batcher.push_mouse(MouseEvent {
+            action: MouseAction::Move,
+            x: 10,
+            y: 20,
+            z: 0,
+            button: None,
+            buttons: Default::default(),
+        });
+
+        let request = batcher.pop_request();
+        assert!(request.is_some());
+        let request = request.unwrap();
+        assert_eq!(request.keyboard.len(), 1);
+        assert_eq!(request.mouse.len(), 1);
+    }
+
+    #[test]
+    fn test_push_request() {
+        let config = BatchConfig {
+            max_batch_size: 4,
+            flush_interval_us: 1000000,
+            adaptive: false,
+        };
+        let mut batcher = EventBatcher::new(config);
+
+        let request = InputRequest {
+            backend: None,
+            keyboard: vec![
+                KeyboardEvent {
+                    action: KeyboardAction::Press,
+                    code: 0x1E,
+                    modifiers: Default::default(),
+                },
+            ],
+            mouse: vec![
+                MouseEvent {
+                    action: MouseAction::Click,
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    button: Some(MouseButton::Left),
+                    buttons: Default::default(),
+                },
+            ],
+        };
+
+        batcher.push_request(request);
+
+        // Should have pending batch (4 events would trigger, but we only have 2)
+        assert!(!batcher.has_pending());
+
+        batcher.flush_all();
+        assert!(batcher.has_pending());
+    }
+
+    #[test]
+    fn test_config_update() {
+        let mut batcher = EventBatcher::default_batcher();
+        assert_eq!(batcher.config().max_batch_size, DEFAULT_BATCH_SIZE);
+
+        let new_config = BatchConfig {
+            max_batch_size: 32,
+            flush_interval_us: 500,
+            adaptive: false,
+        };
+        batcher.set_config(new_config);
+
+        assert_eq!(batcher.config().max_batch_size, 32);
+        assert_eq!(batcher.config().flush_interval_us, 500);
+    }
+
+    #[test]
+    fn test_reset_stats() {
+        let mut batcher = EventBatcher::default_batcher();
+
+        for i in 0..20 {
+            batcher.push_keyboard(KeyboardEvent {
+                action: KeyboardAction::Press,
+                code: i,
+                modifiers: Default::default(),
+            });
+        }
+
+        assert!(batcher.stats().batches_processed > 0);
+
+        batcher.reset_stats();
+
+        assert_eq!(batcher.stats().batches_processed, 0);
+        assert_eq!(batcher.stats().events_processed, 0);
+    }
+
+    #[test]
+    fn test_batch_age() {
+        let batch = EventBatch::new();
+
+        // New batch should have very small age
+        let age = batch.age();
+        assert!(age.as_micros() < 1000);
+
+        // Wait a bit
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Age should have increased
+        let new_age = batch.age();
+        assert!(new_age.as_micros() > age.as_micros());
+    }
+
+    #[test]
+    fn test_batch_clear() {
+        let mut batch = EventBatch::new();
+
+        batch.push_keyboard(KeyboardEvent {
+            action: KeyboardAction::Press,
+            code: 0,
+            modifiers: Default::default(),
+        });
+
+        assert!(!batch.is_empty());
+
+        batch.clear();
+
+        assert!(batch.is_empty());
+    }
 }

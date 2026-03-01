@@ -537,6 +537,97 @@ impl UsbHidDevice {
 /// Thread-safe USB HID device wrapper
 pub type SharedUsbHidDevice = Arc<Mutex<UsbHidDevice>>;
 
+// ============================================================================
+// UsbDevice Trait Implementation
+// ============================================================================
+
+use super::xhci::device::{UsbDevice, UsbSpeed};
+use std::io::Cursor;
+use std::io::Write;
+
+impl UsbDevice for UsbHidDevice {
+    fn device_descriptor(&self) -> &[u8] {
+        // SAFETY: We cast to bytes through a fixed-size struct
+        unsafe {
+            std::slice::from_raw_parts(
+                &self.device_descriptor as *const UsbDeviceDescriptor as *const u8,
+                std::mem::size_of::<UsbDeviceDescriptor>(),
+            )
+        }
+    }
+
+    fn configuration_descriptor(&self) -> &[u8] {
+        // Return a static slice based on device type
+        // This is safe because descriptors are constant
+        static KEYBOARD_CONFIG: &[u8] = &[
+            // Configuration descriptor (9 bytes)
+            0x09, 0x02, 0x22, 0x00, 0x01, 0x01, 0x00, 0x80, 0x32,
+            // Interface descriptor (9 bytes)
+            0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00,
+            // HID descriptor (9 bytes)
+            0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x3F, 0x00,
+            // Endpoint descriptor (7 bytes)
+            0x07, 0x05, 0x81, 0x03, 0x08, 0x00, 0x0A,
+        ];
+
+        static MOUSE_CONFIG: &[u8] = &[
+            // Configuration descriptor (9 bytes)
+            0x09, 0x02, 0x22, 0x00, 0x01, 0x01, 0x00, 0x80, 0x32,
+            // Interface descriptor (9 bytes)
+            0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00,
+            // HID descriptor (9 bytes)
+            0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x32, 0x00,
+            // Endpoint descriptor (7 bytes)
+            0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x0A,
+        ];
+
+        match self.hid_type {
+            HidType::Keyboard => KEYBOARD_CONFIG,
+            HidType::Mouse => MOUSE_CONFIG,
+        }
+    }
+
+    fn handle_control(&mut self, request: &[u8]) -> io::Result<Vec<u8>> {
+        self.handle_control(request)
+    }
+
+    fn handle_transfer(&mut self, ep: u8, _data: &[u8]) -> io::Result<Vec<u8>> {
+        // Handle endpoint transfers
+        match ep {
+            0x81 => {
+                // EP1 IN - Return queued HID report
+                self.get_report().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::WouldBlock, "No report available")
+                })
+            }
+            0x01 => {
+                // EP1 OUT - Receive HID report (for SET_REPORT)
+                // Usually not needed for simple input devices
+                Ok(vec![])
+            }
+            _ => {
+                // Unknown endpoint
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Unknown endpoint: {}", ep),
+                ))
+            }
+        }
+    }
+
+    fn speed(&self) -> UsbSpeed {
+        // USB HID typically uses Full Speed (12 Mbps)
+        UsbSpeed::Full
+    }
+
+    fn reset(&mut self) {
+        self.state = HidState::Default;
+        self.address = 0;
+        self.configuration = 0;
+        self.report_queue.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

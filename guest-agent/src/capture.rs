@@ -69,11 +69,13 @@ pub trait FrameCapture: Send {
 #[cfg(target_os = "linux")]
 pub mod x11 {
     use super::*;
+    use std::ffi::CString;
     use x11rb::connection::Connection;
+    use x11rb::protocol::shm;
     use x11rb::protocol::xproto::*;
     use x11rb::rust_connection::RustConnection;
 
-    /// X11 capture backend
+    /// X11 capture backend with XShm support
     pub struct X11Capture {
         /// Display connection
         display: Option<RustConnection>,
@@ -89,11 +91,21 @@ pub mod x11 {
         format: FrameFormat,
         /// Active state
         active: bool,
-        /// Pre-allocated buffer for zero-copy simulation
+        /// Pre-allocated buffer for fallback
         buffer: Vec<u8>,
+        /// XShm segment ID (if available)
+        shmseg: Option<shm::Seg>,
+        /// XShm shared memory fd
+        shm_fd: Option<i32>,
+        /// XShm mapped memory pointer
+        shm_addr: *mut u8,
+        /// XShm size
+        shm_size: usize,
+        /// Has XShm extension
+        has_shm: bool,
     }
 
-    // X11Capture is Send
+    // X11Capture is Send (shm_addr is only accessed within this struct)
     unsafe impl Send for X11Capture {}
 
     impl X11Capture {
@@ -118,7 +130,229 @@ pub mod x11 {
                 format: FrameFormat::Bgra32,
                 active: false,
                 buffer: Vec::new(),
+                shmseg: None,
+                shm_fd: None,
+                shm_addr: ptr::null_mut(),
+                shm_size: 0,
+                has_shm: false,
             })
+        }
+
+        /// Check if XShm extension is available
+        fn check_shm_extension(&self) -> bool {
+            let display = match &self.display {
+                Some(d) => d,
+                None => return false,
+            };
+
+            // Query SHM extension version
+            match shm::query_version(display) {
+                Ok(cookie) => {
+                    if let Ok(_reply) = cookie.reply() {
+                        log::info!("XShm extension available");
+                        return true;
+                    }
+                }
+                Err(e) => {
+                    log::debug!("XShm query_version failed: {}", e);
+                }
+            }
+            false
+        }
+
+        /// Initialize XShm segment
+        fn init_shm(&mut self, size: usize) -> io::Result<()> {
+            let display = self.display.as_ref().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "No display connection")
+            })?;
+
+            // Create unique shm name
+            let pid = unsafe { libc::getpid() };
+            let shm_name = format!("/lg-capture-{}", pid);
+
+            // Create shared memory object
+            let c_name = CString::new(shm_name.as_str()).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
+            })?;
+
+            let fd = unsafe {
+                // Create with read/write, create if not exists, truncate if exists
+                libc::shm_open(
+                    c_name.as_ptr(),
+                    libc::O_CREAT | libc::O_RDWR | libc::O_EXCL,
+                    0o600,
+                )
+            };
+
+            if fd < 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("shm_open failed: {}", std::io::Error::last_os_error()),
+                ));
+            }
+
+            // Set size
+            let result = unsafe { libc::ftruncate(fd, size as libc::off_t) };
+            if result < 0 {
+                unsafe { libc::close(fd) };
+                let _ = unsafe { libc::shm_unlink(c_name.as_ptr()) };
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("ftruncate failed: {}", std::io::Error::last_os_error()),
+                ));
+            }
+
+            // Map shared memory
+            let addr = unsafe {
+                libc::mmap(
+                    ptr::null_mut(),
+                    size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    fd,
+                    0,
+                )
+            };
+
+            if addr == libc::MAP_FAILED {
+                unsafe { libc::close(fd) };
+                let _ = unsafe { libc::shm_unlink(c_name.as_ptr()) };
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("mmap failed: {}", std::io::Error::last_os_error()),
+                ));
+            }
+
+            // Allocate a new XShm segment ID
+            let seg_id = display
+                .generate_id()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+            // Duplicate fd for X11 (it takes ownership)
+            let fd_for_x11 = unsafe { libc::dup(fd) };
+            if fd_for_x11 < 0 {
+                unsafe {
+                    libc::munmap(addr, size);
+                    libc::close(fd);
+                    libc::shm_unlink(c_name.as_ptr());
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("dup failed: {}", std::io::Error::last_os_error()),
+                ));
+            }
+
+            // Create RawFdContainer from fd
+            let raw_fd = x11rb::utils::RawFdContainer::new(fd_for_x11);
+
+            // Attach the shared memory segment to X server
+            shm::attach_fd(display, seg_id, raw_fd, false).map_err(|e| {
+                unsafe {
+                    libc::munmap(addr, size);
+                    libc::close(fd);
+                    libc::shm_unlink(c_name.as_ptr());
+                }
+                io::Error::new(io::ErrorKind::Other, e.to_string())
+            })?;
+
+            // Unlink the name now - the fd remains valid
+            let _ = unsafe { libc::shm_unlink(c_name.as_ptr()) };
+
+            self.shmseg = Some(seg_id);
+            self.shm_fd = Some(fd);
+            self.shm_addr = addr as *mut u8;
+            self.shm_size = size;
+            self.has_shm = true;
+
+            log::info!(
+                "XShm segment initialized: seg={}, size={}, fd={}, addr={:?}",
+                seg_id,
+                size,
+                fd,
+                self.shm_addr
+            );
+
+            Ok(())
+        }
+
+        /// Capture using XShm (zero-copy)
+        fn capture_shm(&mut self) -> io::Result<CapturedFrame> {
+            let display = self.display.as_ref().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "No display connection")
+            })?;
+
+            let shmseg_id = self.shmseg.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::Other, "XShm segment not initialized")
+            })?;
+
+            // Get image using XShm
+            let cookie = shm::get_image(
+                display,
+                self.root,
+                0,
+                0,
+                self.width as u16,
+                self.height as u16,
+                0xFFFFFFFF,
+                ImageFormat::Z_PIXMAP.into(),
+                shmseg_id,
+                0, // offset
+            )
+            .map_err(|e: x11rb::errors::ConnectionError| {
+                io::Error::new(io::ErrorKind::Other, e.to_string())
+            })?;
+
+            // Wait for completion (XShm GetImage returns depth info)
+            let _reply = cookie.reply().map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("XShm GetImage reply error: {}", e))
+            })?;
+
+            let data_size = self.shm_size;
+
+            Ok(CapturedFrame {
+                data: None,
+                data_ptr: self.shm_addr,
+                data_size,
+                width: self.width,
+                height: self.height,
+                format: self.format,
+                is_keyframe: true,
+            })
+        }
+
+        /// Cleanup XShm resources
+        fn cleanup_shm(&mut self) {
+            if !self.has_shm {
+                return;
+            }
+
+            // Detach from X server
+            if let (Some(display), Some(shmseg_id)) = (&self.display, self.shmseg) {
+                let _ = shm::detach(display, shmseg_id);
+            }
+
+            self.shmseg = None;
+
+            // Unmap shared memory
+            if !self.shm_addr.is_null() && self.shm_size > 0 {
+                unsafe {
+                    libc::munmap(self.shm_addr as *mut libc::c_void, self.shm_size);
+                }
+            }
+
+            // Close fd
+            if let Some(fd) = self.shm_fd {
+                unsafe {
+                    libc::close(fd);
+                }
+            }
+
+            self.shm_fd = None;
+            self.shm_addr = ptr::null_mut();
+            self.shm_size = 0;
+            self.has_shm = false;
+
+            log::debug!("XShm resources cleaned up");
         }
 
         /// Get screen dimensions
@@ -183,13 +417,30 @@ pub mod x11 {
 
     impl FrameCapture for X11Capture {
         fn init(&mut self, width: u32, height: u32, format: FrameFormat) -> io::Result<()> {
+            // Cleanup existing XShm resources if any
+            self.cleanup_shm();
+
             let (screen_w, screen_h) = self.get_screen_dimensions()?;
             self.width = if width == 0 { screen_w } else { width };
             self.height = if height == 0 { screen_h } else { height };
             self.format = format;
 
-            // Pre-allocate buffer
+            // Calculate required size
             let size = (self.width * self.height * format.bytes_per_pixel() as u32) as usize;
+
+            // Try to init XShm for zero-copy
+            if self.check_shm_extension() {
+                match self.init_shm(size) {
+                    Ok(()) => {
+                        log::info!("XShm extension enabled for zero-copy capture");
+                    }
+                    Err(e) => {
+                        log::warn!("XShm init failed, falling back to standard capture: {}", e);
+                    }
+                }
+            }
+
+            // Always allocate fallback buffer
             self.buffer.resize(size, 0);
 
             Ok(())
@@ -200,7 +451,12 @@ pub mod x11 {
                 return Err(io::Error::new(io::ErrorKind::NotConnected, "Capture not active"));
             }
 
-            self.capture_standard()
+            // Prefer XShm if available
+            if self.has_shm && self.shmseg.is_some() {
+                self.capture_shm()
+            } else {
+                self.capture_standard()
+            }
         }
 
         fn dimensions(&self) -> (u32, u32) {
@@ -224,6 +480,7 @@ pub mod x11 {
 
     impl Drop for X11Capture {
         fn drop(&mut self) {
+            self.cleanup_shm();
             // Connection will be cleaned up by x11rb
         }
     }

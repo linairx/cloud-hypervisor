@@ -216,6 +216,23 @@ impl GuestAgent {
             debug!("Cursor position: {}, {}", x, y);
         }
 
+        // Capture audio if active
+        if let Some(ref mut audio) = self.audio_capture {
+            if audio.is_capturing() {
+                let mut audio_buffer = [0u8; 4096];
+                match audio.read_samples(&mut audio_buffer) {
+                    Ok(bytes_read) if bytes_read > 0 => {
+                        self.shm.write_audio(&audio_buffer[..bytes_read])?;
+                        debug!("Captured {} bytes of audio", bytes_read);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!("Audio capture failed: {}", e);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 

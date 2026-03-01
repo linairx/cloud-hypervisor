@@ -16,6 +16,7 @@ pub enum Thread {
     VirtioBalloon,
     VirtioBlock,
     VirtioConsole,
+    VirtioGpu,
     VirtioIommu,
     VirtioMem,
     VirtioNet,
@@ -179,6 +180,13 @@ fn virtio_rng_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     ]
 }
 
+fn virtio_gpu_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
+    vec![
+        (libc::SYS_sched_getaffinity, vec![]),
+        (libc::SYS_set_robust_list, vec![]),
+    ]
+}
+
 fn virtio_vhost_fs_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     vec![
         (libc::SYS_clock_nanosleep, vec![]),
@@ -278,6 +286,7 @@ fn get_seccomp_rules(thread_type: Thread) -> Vec<(i64, Vec<SeccompRule>)> {
         Thread::VirtioBalloon => virtio_balloon_thread_rules(),
         Thread::VirtioBlock => virtio_block_thread_rules(),
         Thread::VirtioConsole => virtio_console_thread_rules(),
+        Thread::VirtioGpu => virtio_gpu_thread_rules(),
         Thread::VirtioIommu => virtio_iommu_thread_rules(),
         Thread::VirtioMem => virtio_mem_thread_rules(),
         Thread::VirtioNet => virtio_net_thread_rules(),
